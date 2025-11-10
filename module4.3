@@ -1,0 +1,136 @@
+Migrating from AWS Fargate
+
+Migrate the orders Component
+
+In this section of the module, we will demonstrate how to migrate applications deployed in Fargate to EKS Auto Mode using the orders component of our retail store application.
+
+We will update the component to migrate to EKS Auto Mode by adding the relevant node selector and tolerations to align with the requirements defined in the apps-auto-mode EKS Auto Mode node pool.
+
+Let's make sure we check the application health and availability by visiting the application load balancer URL from a browser and adding a few items to the cart.
+
+We can access the application UI by executing the following command to extract the Application Load Balancer DNS name and Ctrl/Cmd-clicking on the URL in the output:
+
+kubectl get ingress -n apps retail-store-app-ui-main \
+  -o jsonpath="http://{.status.loadBalancer.ingress[*].hostname}{'\n'}"
+
+Migrate the orders Component
+
+➤ Observe the current state of the orders component:
+
+kubectl get pods -n apps -l app.kubernetes.io/instance=retail-store-app-orders -o wide
+
+The output should show, similar to the below, that the orders component is currently hosted exclusively on Fargate nodes.
+
+NAME                                       READY   STATUS    RESTARTS   AGE     IP            NODE                                                   NOMINATED NODE   READINESS GATES
+retail-store-app-orders-5d5d9d9dfc-7wc6s   1/1     Running   0          3h29m   10.0.74.111   fargate-ip-10-0-74-111.eu-central-1.compute.internal   <none>           <none>
+retail-store-app-orders-5d5d9d9dfc-fkks2   1/1     Running   0          3h24m   10.0.85.172   fargate-ip-10-0-85-172.eu-central-1.compute.internal   <none>           <none>
+retail-store-app-orders-5d5d9d9dfc-mhw9h   1/1     Running   0          3h24m   10.0.49.132   fargate-ip-10-0-49-132.eu-central-1.compute.internal   <none>           <none>
+
+➤ You can review the distribution of instances across all capacity types by executing the following command:
+
+kubectl get nodes -o json | jq -r '.items[].metadata.labels | ."kubernetes.io/hostname" + " | " + ."topology.kubernetes.io/zone" + " | " + (."eks.amazonaws.com/capacityType" // if ."eks.amazonaws.com/compute-type" == "fargate" then "FARGATE" else "KARPENTER" end) + " | " + (."eks.amazonaws.com/nodegroup" // if ."karpenter.sh/nodepool" then "nodepool: " + ."karpenter.sh/nodepool" else "profile: apps" end)' | column -t | sort -k 5
+
+The command output should show the Fargate instances that host the orders component above:
+
+fargate-ip-192-168-116-56.us-west-2.compute.internal   |  us-west-2c  |  FARGATE    |  profile:    apps
+fargate-ip-192-168-180-168.us-west-2.compute.internal  |  us-west-2b  |  FARGATE    |  profile:    apps
+fargate-ip-192-168-191-115.us-west-2.compute.internal  |  us-west-2b  |  FARGATE    |  profile:    apps
+ip-192-168-103-128.us-west-2.compute.internal          |  us-west-2c  |  KARPENTER  |  nodepool:   apps
+ip-192-168-114-228.us-west-2.compute.internal          |  us-west-2c  |  KARPENTER  |  nodepool:   apps
+ip-192-168-127-58.us-west-2.compute.internal           |  us-west-2c  |  KARPENTER  |  nodepool:   apps
+ip-192-168-175-162.us-west-2.compute.internal          |  us-west-2b  |  KARPENTER  |  nodepool:   apps
+ip-192-168-28-67.us-west-2.compute.internal            |  us-west-2c  |  ON_DEMAND  |  apps-mng
+ip-192-168-51-140.us-west-2.compute.internal           |  us-west-2a  |  ON_DEMAND  |  apps-mng
+ip-192-168-83-58.us-west-2.compute.internal            |  us-west-2b  |  ON_DEMAND  |  apps-mng
+ip-192-168-26-158.us-west-2.compute.internal           |  us-west-2c  |  ON_DEMAND  |  system-mng  
+ip-192-168-33-46.us-west-2.compute.internal            |  us-west-2a  |  ON_DEMAND  |  system-mng  
+ip-192-168-86-255.us-west-2.compute.internal           |  us-west-2b  |  ON_DEMAND  |  system-mng  
+
+➤ Create the orders-values.yml file for the orders component (see here 
+
+for the whole values.yml file):
+
+cat << EOF > orders-values.yml
+replicaCount: 3
+
+podAnnotations:
+  eks.amazonaws.com/compute-type: ec2
+
+nodeSelector:
+  role: apps-auto-mode
+
+tolerations:
+  - key: role
+    value: apps-auto-mode
+    operator: Equal
+    effect: NoSchedule
+
+topologySpreadConstraints:
+  - maxSkew: 1
+    minDomains: 3
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: DoNotSchedule
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/instance: retail-store-app-orders
+EOF
+
+To ensure that the orders components are hosted on instances provisioned through the EKS Auto Mode node pool we defined in the previous section, we've added the corresponding node selector and tolerations.
+
+Note that we added a Pod annotation: eks.amazonaws.com/compute-type above to ensure that Pods currently deployed on Fargate instances would gradually migrate to EKS Auto Mode.
+
+Had we created the node selector only, without specifying the annotation, the Pods would be terminated and remained in the Pending state, since the apps Fargate profile instances do not have the corresponding label.
+
+Alternatively, had we deleted the apps Fargate profile, that would cause all orders Pods to be terminated and scheduled at the same time, causing disruption to the application's services.
+
+➤ In a separate VS Code terminal, execute the following command to observe the migration process:
+
+kubectl get pods -n apps -l app.kubernetes.io/name=orders -w
+
+➤ Update the orders component:
+
+1
+2
+3
+4
+5
+helm upgrade retail-store-app-orders oci://public.ecr.aws/aws-containers/retail-store-sample-orders-chart \
+  --version ${RETAIL_STORE_APP_HELM_CHART_VERSION} \
+  --namespace apps \
+  --values orders-values.yml \
+  --wait
+
+➤ Observe that the application remains operational, while the component is being migrated, by navigating to the application UI, Ctrl/Cmd-click the URL in the output, and adding a couple of items to the cart:
+
+kubectl get ingress -n apps retail-store-app-ui-main \
+  -o jsonpath="http://{.status.loadBalancer.ingress[*].hostname}{'\n'}"
+
+➤ After a couple of minutes, verify that all orders Pods are scheduled on the apps-auto-mode node pool by executing:
+
+export APPS_KARPENTER_AUTO_MODE_NODES=$(kubectl get nodes -o json | jq -r '[.items[].metadata.labels | select(."karpenter.sh/nodepool" == "apps-auto-mode") | ."kubernetes.io/hostname"] | join("\\|")')
+kubectl get pods -n apps -l app.kubernetes.io/instance=retail-store-app-orders -o wide | grep "${APPS_KARPENTER_AUTO_MODE_NODES}"
+
+The expected output should be similar to the following, where the instance name being of the form i-xxxxxxxxxxxxxxxxx indicates that it belongs to EKS Auto Mode:
+
+retail-store-app-orders-55c98b46d4-cd68l   1/1     Running   0          5m39s   192.168.8.160    i-0a075bf0169b36e2c
+retail-store-app-orders-55c98b46d4-cn6mm   1/1     Running   0          6m21s   192.168.74.64    i-0b694975e1e8ac9c7
+retail-store-app-orders-55c98b46d4-fzxt6   1/1     Running   0          2m18s   192.168.42.224   i-001a27779836de720
+
+➤ We can, once more, review the distribution of instances across all capacity types by executing the following command and observing the change (removal of Fargate nodes and a new type of nodes provisioned via EKS Auto Mode apps-auto-mode node pool)
+
+kubectl get nodes -o json | jq -r '.items[].metadata.labels | ."kubernetes.io/hostname" + " | " + ."topology.kubernetes.io/zone" + " | " + (."eks.amazonaws.com/capacityType" // if ."eks.amazonaws.com/compute-type" == "fargate" then "FARGATE" else "KARPENTER" end) + " | " + (."eks.amazonaws.com/nodegroup" // if ."karpenter.sh/nodepool" then "nodepool: " + ."karpenter.sh/nodepool" else "profile: apps" end)' | column -t | sort -k 5
+
+The output should show instances provisioned through new EKS Auto Mode nodepool and no Fargate instances in the cluster:
+
+ip-192-168-153-77.us-west-2.compute.internal   |  us-west-2b  |  KARPENTER  |  nodepool:   apps
+ip-192-168-165-109.us-west-2.compute.internal  |  us-west-2c  |  KARPENTER  |  nodepool:   apps
+ip-192-168-97-157.us-west-2.compute.internal   |  us-west-2a  |  KARPENTER  |  nodepool:   apps
+i-001a27779836de720                            |  us-west-2b  |  KARPENTER  |  nodepool:   apps-auto-mode
+i-0a075bf0169b36e2c                            |  us-west-2a  |  KARPENTER  |  nodepool:   apps-auto-mode
+i-0b694975e1e8ac9c7                            |  us-west-2c  |  KARPENTER  |  nodepool:   apps-auto-mode
+ip-192-168-136-11.us-west-2.compute.internal   |  us-west-2b  |  ON_DEMAND  |  apps-mng
+ip-192-168-171-62.us-west-2.compute.internal   |  us-west-2c  |  ON_DEMAND  |  apps-mng
+ip-192-168-98-145.us-west-2.compute.internal   |  us-west-2a  |  ON_DEMAND  |  apps-mng
+ip-192-168-126-11.us-west-2.compute.internal   |  us-west-2a  |  ON_DEMAND  |  system-mng  
+ip-192-168-151-213.us-west-2.compute.internal  |  us-west-2b  |  ON_DEMAND  |  system-mng  
+ip-192-168-184-34.us-west-2.compute.internal   |  us-west-2c  |  ON_DEMAND  |  system-mng  
