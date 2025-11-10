@@ -1,0 +1,11 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: eks-auto-ebs-iops-kms-sc
+provisioner: ebs.csi.eks.amazonaws.com
+volumeBindingMode: WaitForFirstConsumer
+parameters:
+  type: gp3
+  iops: "6000"
+  encrypted: "true"
+  kmsKeyId: b0695443-489b-4e38-b74f-fc608c26bfc7
