@@ -1,0 +1,232 @@
+Node Launch
+
+Overview | Review the EKS Auto Mode configuration | Scale the application | Improve the application resilience | Summary
+Overview
+
+When using EKS Auto Mode, cluster compute resources are automatically provisioned and managed by EKS. The service automates routine tasks for creating new EC2 instances and registering them as nodes to your EKS cluster. When a workload cannot be scheduled onto existing nodes, EKS Auto Mode creates a new, appropriately sized EC2 instance.
+
+EC2 instances created by EKS Auto Mode are EC2 managed instances 
+
+. These provide a simplified way to run compute workloads on Amazon EC2 by delegating operational control to a service provider - in this case, EKS Auto Mode.
+
+By delegating control to EKS Auto Mode, you benefit from AWS's operational expertise and best practices for running Amazon EKS. EKS handles tasks such as provisioning instances, configuring software, scaling capacity, and managing instance failures and replacements. While you maintain visibility of the managed instances through the AWS console and can use instance storage as ephemeral storage for workloads, direct access and software installation on these instances are not permitted. You can review the list of supported instance types in the docs 
+and see a detailed comparison 
+
+between standard EC2 instances and EKS Auto Mode managed instances.
+
+Note that you can't directly access or install software on instances managed by EKS Auto Mode.
+Review the EKS Auto Mode configuration
+
+EKS Auto Mode's node provisioning relies on Karpenter 
+objects, with dedicated specifications for NodeClasses 
+and NodePools 
+
+.
+
+The NodeClass specification allows to define infrastructure-level settings for groups of nodes, including network configuration, storage settings, and resource tagging.
+
+The NodePool specification enables fine-grained control over compute resources through various supported labels and compute requirements configuration. This includes options for EC2 instance categories, CPU configurations, availability zones, architectures (ARM64/AMD64), and capacity types (spot/on-demand). You can also set resource limits for CPU and memory usage to maintain desired operational boundaries.
+
+EKS Auto Mode includes two default managed node pools: general-purpose and system. The general-purpose node pool handles user-deployed applications and services, while the system node pool is dedicated to critical system-level components managing cluster operations. Custom node pools can be created for specific compute or configuration requirements.
+
+Let's explore the built-in node pools and their managed instances.
+Review node pools configuration
+
+➤ View the managed instances in the general-purpose node pool:
+
+kubectl get nodes -l karpenter.sh/nodepool=general-purpose
+
+The output should show a single managed instance:
+
+NAME                  STATUS   ROLES    AGE   VERSION
+i-05e5427f9dc2f4b2e   Ready    <none>   31m   v1.32.3-eks-7636447
+
+➤ View the managed instances in the system node pool:
+
+kubectl get nodes -l karpenter.sh/nodepool=system
+
+This should produce an empty result:
+
+No resources found
+
+Note: The system node pool is currently empty as no system components, in addition to those managed by the EKS Auto Mode, have been installed. All application pods are running on the general-purpose node pool.
+
+➤ We can verify this by checking the Pod distribution across the general-purpose nodes:
+
+for node in $(kubectl get nodes -l karpenter.sh/nodepool=general-purpose -o custom-columns=NAME:.metadata.name --no-headers); do
+  echo "Pods on $node:"
+  kubectl get pods --all-namespaces --field-selector spec.nodeName=$node
+done
+
+The expected output should be similar to the following:
+
+Pods on i-0ee0842e974bafc6c:
+NAMESPACE   NAME                                        READY   STATUS    RESTARTS   AGE
+default     retail-store-app-carts-5f5b7449f-tgscs      1/1     Running   0          8m3s
+default     retail-store-app-catalog-dcb5d8d4c-5ftp9    1/1     Running   0          8m6s
+default     retail-store-app-checkout-f5bb5c5bb-pkgg7   1/1     Running   0          8m2s
+default     retail-store-app-orders-5fbb6b8576-x6vs9    1/1     Running   0          8m5s
+default     retail-store-app-ui-7b7c8f6b94-2ltrs        1/1     Running   0          8m
+
+Currently, all pods are running on a single node since it adequately meets the workloads' resource requirements without any specific scheduling constraints.
+Scale the application
+
+Let's manually scale the application UI component to observe how Auto Mode automatically provisions new nodes to meet the increased demand.
+
+➤ In a separate IDE terminal, watch for new nodes:
+
+watch -t kubectl get nodes
+
+This command will continuously monitor and display changes to cluster nodes. To exit, press Ctrl/Cmd+C in the terminal.
+
+➤ Scale the UI component:
+
+kubectl scale --replicas=12 deployment/retail-store-app-ui
+
+This should produce this output:
+
+deployment.apps/retail-store-app-ui scaled
+
+The watch command output should eventually show new nodes (initially with NotReady status) being added to accommodate the additional UI component replicas:
+
+NAME                  STATUS   ROLES    AGE   VERSION
+i-00642042ad4eff3c9   Ready    <none>   17s   v1.30.8-eks-3c20087
+i-009db40705eb0417d   Ready    <none>   10m   v1.30.8-eks-3c20087
+
+➤ To see how EKS Auto Mode responded to the scaling event, examine the cluster events:
+
+kubectl events
+
+The output will include events related to pods, NodePools, and Nodes.
+Expand to view the events
+
+➤ Let's examine the current Pod distribution:
+
+for node in $(kubectl get nodes -l karpenter.sh/nodepool=general-purpose -o custom-columns=NAME:.metadata.name --no-headers); do
+  echo "Pods on $node:"
+  kubectl get pods --all-namespaces --field-selector spec.nodeName=$node
+done
+
+The command should produce an output similar to the following:
+
+Pods on i-092974f55c2956b90:
+NAMESPACE   NAME                                   READY   STATUS    RESTARTS   AGE
+default     retail-store-app-ui-7b7c8f6b94-4vdfm   1/1     Running   0          3m13s
+default     retail-store-app-ui-7b7c8f6b94-8tgkg   1/1     Running   0          3m14s
+default     retail-store-app-ui-7b7c8f6b94-8xcvs   1/1     Running   0          3m14s
+default     retail-store-app-ui-7b7c8f6b94-bhlt8   1/1     Running   0          3m13s
+default     retail-store-app-ui-7b7c8f6b94-c8rfs   1/1     Running   0          3m14s
+default     retail-store-app-ui-7b7c8f6b94-jjlmd   1/1     Running   0          3m14s
+default     retail-store-app-ui-7b7c8f6b94-p8frf   1/1     Running   0          3m13s
+default     retail-store-app-ui-7b7c8f6b94-qnqrn   1/1     Running   0          3m13s
+default     retail-store-app-ui-7b7c8f6b94-xdxqc   1/1     Running   0          3m14s
+default     retail-store-app-ui-7b7c8f6b94-xsqds   1/1     Running   0          3m14s
+Pods on i-0ee0842e974bafc6c:
+NAMESPACE   NAME                                        READY   STATUS    RESTARTS   AGE
+default     retail-store-app-carts-5f5b7449f-tgscs      1/1     Running   0          12m
+default     retail-store-app-catalog-dcb5d8d4c-5ftp9    1/1     Running   0          12m
+default     retail-store-app-checkout-f5bb5c5bb-pkgg7   1/1     Running   0          12m
+default     retail-store-app-orders-5fbb6b8576-x6vs9    1/1     Running   0          12m
+default     retail-store-app-ui-7b7c8f6b94-2ltrs        1/1     Running   0          12m
+default     retail-store-app-ui-7b7c8f6b94-4hwth        1/1     Running   0          3m15s
+
+Note that the UI component pods are currently densely packed, with most placed on a single node, which reduces resilience. In the next step, we'll explore how to improve that using EKS Auto Mode capabilities.
+Improve the application resilience
+Topology spread constraints
+
+To enhance application resiliency, it's crucial to distribute pods across multiple AZs and nodes. We'll apply Pod Topology Spread Constraints 
+
+to our UI component to ensure better fault tolerance and distribution.
+Update the UI component
+
+➤ Update the values-ui.yaml file and re-deploy the Helm chart:
+
+cat  << EOF >~/environment/values-ui.yaml
+app:
+  theme: default
+  endpoints:
+    catalog: http://retail-store-app-catalog:80
+    carts: http://retail-store-app-carts:80
+    checkout: http://retail-store-app-checkout:80
+    orders: http://retail-store-app-orders:80
+
+topologySpreadConstraints:
+  - maxSkew: 1
+    minDomains: 3
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: DoNotSchedule
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: ui
+EOF
+
+helm upgrade -f ~/environment/values-ui.yaml retail-store-app-ui oci://public.ecr.aws/aws-containers/retail-store-sample-ui-chart --version ${RETAIL_STORE_APP_HELM_CHART_VERSION} --hide-notes
+
+The output should be similar to:
+
+Pulled: public.ecr.aws/aws-containers/retail-store-sample-ui-chart:1.1.0
+Digest: sha256:5cd721c10214c306b06c7223367f626f21a8d471eee8f0a576742426f84141f2
+Release "retail-store-app-ui" has been upgraded. Happy Helming!
+NAME: retail-store-app-ui
+LAST DEPLOYED: Mon Jan 20 20:33:32 2025
+NAMESPACE: default
+STATUS: deployed
+REVISION: 2
+
+The configuration specifies a maximum skew of 1 and requires a minimum of 3 AZs, ensuring that the difference in pod count between any two zones does not exceed 1. When the constraints cannot be satisfied, pods will not be scheduled (DoNotSchedule), prioritizing proper distribution over immediate deployment.
+Note
+
+The manually-scaled UI component will automatically reset to the default number of replicas (which is 1) after we deploy the updated configuration.
+
+➤ Now, let's scale the application again to see how Pod spread topology impacts the scaling behavior:
+
+kubectl scale --replicas=12 deployment/retail-store-app-ui
+
+As before, this is the expected output:
+
+deployment.apps/retail-store-app-ui scaled
+
+➤ Wait for all the scaled UI component pods to become ready:
+
+kubectl wait --for=condition=Ready pod -l app.kubernetes.io/instance=retail-store-app-ui --namespace default --timeout=300s
+
+➤ Once the above command terminates, verify that the UI component pods are spread across different availability zones:
+
+kubectl get node -L topology.kubernetes.io/zone --no-headers | while read node status roles age version zone; do
+echo "Pods on node $node (Zone: $zone):"
+  kubectl get pods --all-namespaces --field-selector spec.nodeName=$node -l app.kubernetes.io/instance=retail-store-app-ui
+echo "-----------------------------------"
+done
+
+This should produce an output similar to the following:
+
+Pods on node i-08104c0f996d4db79 (Zone: us-west-2a):
+NAMESPACE   NAME                                   READY   STATUS    RESTARTS   AGE
+default     retail-store-app-ui-7fbf6d97b9-d9tqs   1/1     Running   0          2m1s
+default     retail-store-app-ui-7fbf6d97b9-ghkbm   1/1     Running   0          2m1s
+default     retail-store-app-ui-7fbf6d97b9-lm6fp   1/1     Running   0          2m1s
+default     retail-store-app-ui-7fbf6d97b9-t9pbl   1/1     Running   0          2m27s
+-----------------------------------
+Pods on node i-09301d4c5dea017fb (Zone: us-west-2c):
+NAMESPACE   NAME                                   READY   STATUS    RESTARTS   AGE
+default     retail-store-app-ui-7fbf6d97b9-9bncz   1/1     Running   0          2m2s
+default     retail-store-app-ui-7fbf6d97b9-wm76b   1/1     Running   0          2m2s
+default     retail-store-app-ui-7fbf6d97b9-zqg2z   1/1     Running   0          2m2s
+default     retail-store-app-ui-7fbf6d97b9-zwfw7   1/1     Running   0          40s
+-----------------------------------
+Pods on node i-0ed7e4a8df8557487 (Zone: us-west-2b):
+NAMESPACE   NAME                                   READY   STATUS    RESTARTS   AGE
+default     retail-store-app-ui-7fbf6d97b9-4vlzz   1/1     Running   0          2m3s
+default     retail-store-app-ui-7fbf6d97b9-847q2   1/1     Running   0          2m3s
+default     retail-store-app-ui-7fbf6d97b9-f42hz   1/1     Running   0          2m3s
+default     retail-store-app-ui-7fbf6d97b9-mkn7q   1/1     Running   0          2m3s
+-----------------------------------
+
+The Pod topology spread constraints have successfully distributed the workload across multiple AZs and nodes, ensuring high availability and fault tolerance.
+
+Note that, depending on the original placement of the application pods, it may take a short while to fully complete.
+Summary
+
+In this section, we've examined EKS Auto Mode's built-in system and general-purpose node pools, demonstrated manual scaling of the application, and improved its resilience by implementing AZ-level topology spread constraints for the UI component.
+
+In the next section, we'll explore automated scaling policies for the UI application to replace manual scaling operations. We'll examine how EKS Auto Mode manages dynamic resource allocation and workload distribution in response to these policies.
