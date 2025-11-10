@@ -1,0 +1,152 @@
+Migrating from EKS Managed Node Groups
+
+Migrate the Catalog Component
+
+In this section of the module, we will migrate the catalog component and its MySQL database that are deployed onto the apps-mng managed node group.
+
+We will update these components to migrate to EKS Auto Mode by adding the relevant node selector and tolerations to align with the requirements defined in the apps-auto-mode EKS Auto Mode node pool.
+Migrate the catalog Component
+
+For this assignment, we will only migrate the deployment part of the component and leave the StatefulSet as it is now, with no impact on the application. Migrating EBS-based stateful applications, which MySQL is, requires a separate process, which we'll explore in the later assignment called "Migrating Stateful Applications".
+
+➤ Create the catalog-values.yml file for the catalog component (see here 
+
+for the whole values.yml file):
+
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+32
+33
+34
+35
+36
+37
+38
+39
+40
+41
+cat << EOF > catalog-values.yml
+replicaCount: 3
+
+nodeSelector:
+  role: apps-auto-mode
+
+tolerations:
+  - key: role
+    value: apps-auto-mode
+    operator: Equal
+    effect: NoSchedule
+
+app:
+  persistence:
+    provider: mysql
+    endpoint: ""
+    database: "catalog"
+
+    secret:
+      create: true
+      name: catalog-db
+      username: catalog
+      password: "mysqlcatalog123"
+
+mysql:
+  create: true
+  nodeSelector:
+    role: apps-mng
+  tolerations:
+    - key: role
+      value: apps-mng
+      operator: Equal
+      effect: NoSchedule
+
+  persistentVolume:
+    enabled: true
+    accessModes:
+      - ReadWriteOnce
+    size: 10Gi
+    storageClass: "gp3"
+EOF
+
+➤ In a separate VS Code terminal, execute the following command to observe the migration process:
+
+kubectl get pods -n apps -l app.kubernetes.io/name=catalog -w
+
+➤ Verify that all catalog component pods are still on the original managed node groups:
+
+kubectl get pods -n apps -l app.kubernetes.io/instance=retail-store-app-catalog -o wide
+
+➤ Review the distribution of instances across all capacity types by executing the following command and observing the change (note the nodes where the catalog is running):
+
+kubectl get nodes -o json | jq -r '.items[].metadata.labels | ."kubernetes.io/hostname" + " | " + ."topology.kubernetes.io/zone" + " | " + (."eks.amazonaws.com/capacityType" // if ."eks.amazonaws.com/compute-type" == "fargate" then "FARGATE" else "KARPENTER" end) + " | " + (."eks.amazonaws.com/nodegroup" // if ."karpenter.sh/nodepool" then "nodepool: " + ."karpenter.sh/nodepool" else "profile: apps" end)' | column -t | sort -k 5
+
+➤ Now, let's update the catalog component:
+
+1
+2
+3
+4
+5
+6
+helm upgrade retail-store-app-catalog oci://public.ecr.aws/aws-containers/retail-store-sample-catalog-chart \
+  --version ${RETAIL_STORE_APP_HELM_CHART_VERSION} \
+  --namespace apps \
+  --values catalog-values.yml \
+  --reuse-values \
+  --wait
+
+➤ After a couple of minutes, verify that all catalog Pods are scheduled on the apps-auto-mode nodes (again, identified by their i-xxxxxxxxxxxxxxxxx name) by executing:
+
+export APPS_KARPENTER_AUTO_MODE_NODES=$(kubectl get nodes -o json | jq -r '[.items[].metadata.labels | select(."karpenter.sh/nodepool" == "apps-auto-mode") | ."kubernetes.io/hostname"] | join("\\|")')
+kubectl get pods -n apps -l app.kubernetes.io/instance=retail-store-app-catalog -o wide | grep "${APPS_KARPENTER_AUTO_MODE_NODES}"
+
+➤ Verify that the catalog component's MySQL StatefulSet pods are still on the original managed node groups:
+
+kubectl get pods -n apps -l app.kubernetes.io/name=retail-store-app-catalog -o wide
+
+➤ As before, review the distribution of instances across all capacity types by executing the following command and observing the change (removal of Fargate nodes and a new type of nodes provisioned via EKS Auto Mode apps-auto-mode node pool):
+
+kubectl get nodes -o json | jq -r '.items[].metadata.labels | ."kubernetes.io/hostname" + " | " + ."topology.kubernetes.io/zone" + " | " + (."eks.amazonaws.com/capacityType" // if ."eks.amazonaws.com/compute-type" == "fargate" then "FARGATE" else "KARPENTER" end) + " | " + (."eks.amazonaws.com/nodegroup" // if ."karpenter.sh/nodepool" then "nodepool: " + ."karpenter.sh/nodepool" else "profile: apps" end)' | column -t | sort -k 5
+
+The output should show instances provisioned through the new EKS Auto Mode NodePool and no Fargate instances in the cluster:
+
+ip-192-168-109-141.us-west-2.compute.internal  |  us-west-2a  |  KARPENTER  |  nodepool:   apps
+ip-192-168-144-11.us-west-2.compute.internal   |  us-west-2b  |  KARPENTER  |  nodepool:   apps
+ip-192-168-167-219.us-west-2.compute.internal  |  us-west-2c  |  KARPENTER  |  nodepool:   apps
+i-085c7fe5654a651c8                            |  us-west-2a  |  KARPENTER  |  nodepool:   apps-auto-mode
+i-0ce7c07eb76652c22                            |  us-west-2c  |  KARPENTER  |  nodepool:   apps-auto-mode
+i-0d26a453b47d25d9f                            |  us-west-2b  |  KARPENTER  |  nodepool:   apps-auto-mode
+ip-192-168-112-81.us-west-2.compute.internal   |  us-west-2a  |  ON_DEMAND  |  apps-mng
+ip-192-168-150-83.us-west-2.compute.internal   |  us-west-2b  |  ON_DEMAND  |  apps-mng
+ip-192-168-184-40.us-west-2.compute.internal   |  us-west-2c  |  ON_DEMAND  |  apps-mng
+ip-192-168-133-200.us-west-2.compute.internal  |  us-west-2b  |  ON_DEMAND  |  system-mng  
+ip-192-168-171-235.us-west-2.compute.internal  |  us-west-2c  |  ON_DEMAND  |  system-mng  
+ip-192-168-99-105.us-west-2.compute.internal   |  us-west-2a  |  ON_DEMAND  |  system-mng  
