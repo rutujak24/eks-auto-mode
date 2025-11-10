@@ -1,0 +1,16 @@
+replicaCount: 5
+  
+topologySpreadConstraints:
+  - maxSkew: 1
+    minDomains: 5
+    topologyKey: capacity-spread
+    whenUnsatisfiable: DoNotSchedule
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: catalog
+
+nodeSelector:
+  EKSAutoNodePool: OnDemandSpotSplit
+tolerations:
+- key: "OnDemandSpotSplit"
+  operator: "Exists"
