@@ -1,0 +1,54 @@
+Cleanup Environment
+
+If you have run the workshop In your own AWS Account it is recommended to clean up resources so no extra costs will occur.
+
+Sign-in in to the AWS Management Console, make sure to change to the AWS Region you deployed the workshop in, use the Region selector in the upper-right corner of the page.
+1. Delete the eks-automode-workshop CloudFormation Stack
+
+    Navigate to the AWS CloudFormation console 
+
+In the Navigation pane, choose Stacks.
+Search for the eks-automode-workshop
+
+    Stack.
+    Choose the eks-automode-workshop Stack and Click Delete, a popup will open, click Delete.
+    Deleting the eks-automode-workshop stack will automatically delete all the additional stacks created as part of it.
+    Deletion is completed when you are no longer able to see the eks-automode-workshop stack and all its related stacks.
+
+Note
+
+This process might take a while (approximately 30 minutes).
+Delete the CloudFormation Stack
+2. Module 2: EBS Storage - Delete EBS volumes used by the demo cluster.
+
+    Navigate to the Amazon Elastic Compute Cloud (EC2) console 
+
+In the Navigation pane, choose Volumes.
+Search and Select the EBS volumes provisioned by the EBS CSI driver, you can use the search filter KubernetesCluster = demo-cluster
+
+    Choose Actions, and choose Delete Volume.
+    To confirm deletion, type delete in the field, and then click Delete.
+
+Delete the EBS volumes
+3. Module 2: EBS Storage - Delete the AWS Key Management Service (KMS) key
+
+    Navigate to the AWS Key Management Service console 
+
+In the Navigation pane, choose Customer managed keys.
+Search and Select the KMS key created for the default StorageClass encryption, you can use the search filter Name = eks-automode-workshop
+
+    Choose Key actions, and choose Schedule key deletion.
+    (Optional) Reduce the waiting period to a minimum of 7 days.
+    Ensure that the Keys to delete table only includes the keys from the workshop.
+    Select Confirm that you want to schedule these keys for deletion after a X day waiting period.
+    Click Schedule deletion.
+
+Delete the EBS KMS Key
+4. Module 4: Migration - Delete the migration cluster Node IAM Role
+
+    Navigate to the Amazon IAM Identity and Access Management (IAM) console 
+
+In the Navigation pane, choose Roles
+In the Search bar, Search for migration-cluster-auto-mode-node-role
+Select the Node IAM Role and Choose Delete.
+Confirm deletion by entering the role name in the text input field and click Delete.
