@@ -1,0 +1,55 @@
+Checking the upgrade
+
+Check the upgrade | Summary
+Check the upgrade
+
+➤ Using the aws eks describe-cluster AWS CLI command, we will check if the upgrade process is complete:
+
+aws eks describe-cluster --region $AWS_REGION --name $DEMO_CLUSTER_NAME --query "cluster.version" --output text
+
+If enough time has passed, we should see that our cluster is now have been upgraded and is now running Amazon EKS version 1.33:
+
+1.33
+
+If by this point the control plane haven't yet been upgraded, and depending on your available time, we advise you to either take a small break here, or progress to the Migration patterns module, and get back to check the upgrade once you're done.
+
+For convenience, you can open a new IDE terminal and execute the following command:
+
+watch -t aws eks describe-cluster --region $AWS_REGION --name $DEMO_CLUSTER_NAME --query "cluster.version" --output text
+
+➤ We can now verify the worker nodes version:
+
+kubectl get nodes
+
+If the worker nodes have been upgraded we should see their version matching the Amazon EKS version:
+
+NAME                  STATUS   ROLES    AGE     VERSION
+i-01774cb623e95980b   Ready    <none>   6m33s   v1.33.0-eks-987fa8d
+...
+
+Similarly, if by this point the nodes haven't yet been upgraded, you can open a new IDE terminal and execute the following command:
+
+watch -t kubectl get nodes
+
+Once Amazon EKS Auto Mode detects that the EKS control plane version was upgraded, and it triggered node replacement through its drift detection mechanism. Let's examine the related events that occurred during this process.
+
+➤ Execute the following command to view the drift-related events:
+
+kubectl get events | grep Drifted
+
+19m         Normal    DisruptionLaunching              nodeclaim/advanced-networking-vpthn                               Launching NodeClaim: Drifted
+32s         Normal    DisruptionTerminating            nodeclaim/advanced-networking-vpthn                               Disrupting NodeClaim: Drifted
+19m         Normal    DisruptionTerminating            node/i-03e6de8867bb6e67e                                          Disrupting Node: Drifted
+2m2s        Normal    DisruptionTerminating            node/i-04a21a34422cd8e7d                                          Disrupting Node: Drifted
+...
+
+This output shows the orchestrated node replacement process in action. Amazon EKS Auto Mode follows a carefully sequenced approach:
+
+    First, it launches new replacement nodes
+    Then it evicts pods from the old nodes
+    It waits until the new replacement nodes are in the Ready state before terminating the old nodes
+
+When Pod Disruption Budgets (PDBs) are configured, Auto Mode respects these budgets by using a backoff retry eviction strategy. Pods will never be forcibly deleted during normal operation. However, pods that fail to shut down will prevent a node from being deleted until the terminationGracePeriod is reached, at which point those pods will be forcibly deleted.
+Summary
+
+Congratulations! In this section, we have successfully updated our cluster to the latest version of Kubernetes. We've observed how Amazon EKS Auto Mode automatically manages the worker node upgrades to match the control plane version, demonstrating the zero-touch infrastructure update capabilities that simplify Kubernetes operations.
