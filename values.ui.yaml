@@ -1,0 +1,35 @@
+app:
+  theme: default
+  endpoints:
+    catalog: http://retail-store-app-catalog:80
+    carts: http://retail-store-app-carts:80
+    checkout: http://retail-store-app-checkout:80
+    orders: http://retail-store-app-orders:80
+
+replicaCount: 3
+
+autoscaling:
+  enabled: false
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 80
+
+topologySpreadConstraints:
+   - maxSkew: 1
+     minDomains: 3
+     topologyKey: topology.kubernetes.io/zone
+     whenUnsatisfiable: DoNotSchedule
+     labelSelector:
+       matchLabels:
+         app.kubernetes.io/name: ui
+
+ingress:
+  enabled: true
+  className: eks-auto-alb
+  annotations:
+    alb.ingress.kubernetes.io/healthcheck-path: /actuator/health/liveness
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: '15'
+    alb.ingress.kubernetes.io/healthcheck-timeout-seconds: '5'
+    alb.ingress.kubernetes.io/healthy-threshold-count: '2'
+    alb.ingress.kubernetes.io/unhealthy-threshold-count: '2'
+    alb.ingress.kubernetes.io/success-codes: '200-399'
