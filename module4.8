@@ -1,0 +1,174 @@
+Removing non-EKS Auto Mode Add-ons and Compute
+
+Uninstall Karpenter | Uninstall the AWS Load Balancer Controller | Remove the Add-ons | Delete the Node Groups | Delete the Fargate Profile
+
+After migrating to EKS Auto Mode, which includes several Kubernetes capabilities as core components we no longer require the following components and compute options:
+
+    The AWS Fargate apps profile
+    The apps-mng managed node group
+    The system-mng managed node group
+    The CoreDNS add-on
+    The Amazon VPC CNI add-on
+    The kube-proxy add-on
+    The EBS CSI Driver add-on
+    The EKS Pod Identity Agent add-on
+    The self-managed AWS Load Balancer Controller
+    The self-managed Karpenter
+
+We will now remove these components from the migration cluster.
+Uninstall the Self-Managed AWS Load Balancer Controller
+
+➤ First, we'll uninstall the AWS Load Balancer Controller Helm chart and delete its CRDs:
+
+helm uninstall --namespace kube-system aws-load-balancer-controller
+kubectl delete -k "github.com/aws/eks-charts/stable/aws-load-balancer-controller/crds?ref=master"
+
+➤ Extract the AWS Load Balancer Controller's role Pod identity association:
+
+export LBC_POD_IDENTITY_ASSOCIATION_ID=$(aws eks list-pod-identity-associations \
+  --cluster-name ${MIGRATION_CLUSTER_NAME} \
+  --namespace kube-system \
+  --service-account aws-load-balancer-controller \
+  --query 'associations[*].associationId' \
+  --output text)
+
+➤ Now we'll detach and delete the AWS Load Balancer Controller policy:
+
+export LBC_ROLE_NAME=$(aws eks describe-pod-identity-association \
+  --cluster-name ${MIGRATION_CLUSTER_NAME} \
+  --association-id ${LBC_POD_IDENTITY_ASSOCIATION_ID} | jq -r '.association.roleArn | split("/") | .[1]')
+
+export LBC_POLICY_ARN=$(aws iam list-attached-role-policies \
+  --role-name ${LBC_ROLE_NAME} | \
+  jq -r '.AttachedPolicies[].PolicyArn')
+
+aws iam detach-role-policy \
+    --role-name ${LBC_ROLE_NAME} \
+    --policy-arn ${LBC_POLICY_ARN}
+
+aws iam delete-policy \
+    --policy-arn ${LBC_POLICY_ARN}
+
+➤ Finally, we'll delete the Pod identity association:
+
+aws eks delete-pod-identity-association \
+  --cluster-name ${MIGRATION_CLUSTER_NAME} \
+  --association-id ${LBC_POD_IDENTITY_ASSOCIATION_ID}
+
+Uninstall the Self-Managed Karpenter
+
+➤ Verify that there are no self-managed Karpenter-created nodes:
+
+kubectl get nodes -o json | jq -r '.items[].metadata.labels | ."kubernetes.io/hostname" + " | " + ."topology.kubernetes.io/zone" + " | " + (."eks.amazonaws.com/capacityType" // if ."eks.amazonaws.com/compute-type" == "fargate" then "FARGATE" else "KARPENTER" end) + " | " + (."eks.amazonaws.com/nodegroup" // if ."karpenter.sh/nodepool" then "nodepool: " + ."karpenter.sh/nodepool" else "profile: apps" end)' | column -t | sort -k 5
+
+➤ Now let's delete the NodePool and NodeClass:
+
+kubectl delete nodepool apps
+kubectl delete ec2nodeclass apps
+
+➤ Next, we'll uninstall Karpenter:
+
+helm uninstall --namespace kube-system karpenter
+
+➤ Delete the self-managed Karpenter nodes access entry:
+
+aws eks delete-access-entry \
+  --cluster-name ${MIGRATION_CLUSTER_NAME} \
+  --principal-arn arn:aws:iam::${AWS_ACCOUNT_ID}:role/KarpenterNodeRole-${MIGRATION_CLUSTER_NAME}
+
+➤ Extract the Karpenter role Pod identity association:
+
+export KARPENTER_POD_IDENTITY_ASSOCIATION_ID=$(aws eks list-pod-identity-associations \
+  --cluster-name ${MIGRATION_CLUSTER_NAME} \
+  --namespace kube-system \
+  --service-account karpenter \
+  --query 'associations[*].associationId' \
+  --output text)
+
+➤ Extract the Karpenter controller role name:
+
+export KARPENTER_ROLE_NAME=$(aws eks describe-pod-identity-association \
+  --cluster-name ${MIGRATION_CLUSTER_NAME} \
+  --association-id ${KARPENTER_POD_IDENTITY_ASSOCIATION_ID} | jq -r '.association.roleArn | split("/") | .[1]')
+
+➤ Detach the Karpenter policy:
+
+aws iam detach-role-policy \
+  --role-name ${KARPENTER_ROLE_NAME} \
+  --policy-arn arn:aws:iam::${AWS_ACCOUNT_ID}:policy/KarpenterControllerPolicy-${MIGRATION_CLUSTER_NAME}
+
+➤ Delete the Pod identity association:
+
+aws eks delete-pod-identity-association \
+  --cluster-name ${MIGRATION_CLUSTER_NAME} \
+  --association-id ${KARPENTER_POD_IDENTITY_ASSOCIATION_ID}
+
+➤ Remove Karpenter-related instance profiles:
+
+KARPENTER_NODE_ROLE=KarpenterNodeRole-${MIGRATION_CLUSTER_NAME}
+KARPENTER_INSTANCE_PROFILES=$(aws iam list-instance-profiles-for-role \
+  --role-name ${KARPENTER_NODE_ROLE} \
+  --query 'InstanceProfiles[*].InstanceProfileName' \
+  --output text)
+
+for profile in ${KARPENTER_INSTANCE_PROFILES}; do
+  echo "Removing role from instance profile ${profile}"
+  aws iam remove-role-from-instance-profile --instance-profile-name "${profile}" --role-name ${KARPENTER_NODE_ROLE}
+  echo "Deleting instance profile ${profile}"
+  aws iam delete-instance-profile --instance-profile-name "${profile}"
+done
+
+➤ Delete the Karpenter role:
+
+aws iam delete-role --role-name ${KARPENTER_ROLE_NAME}
+
+➤ Remove the remaining Karpenter-related resources:
+
+aws cloudformation delete-stack --stack-name Karpenter-${MIGRATION_CLUSTER_NAME}
+aws cloudformation wait stack-delete-complete --stack-name Karpenter-${MIGRATION_CLUSTER_NAME}
+
+aws ec2 describe-launch-templates --filters "Name=tag:karpenter.k8s.aws/cluster,Values=${MIGRATION_CLUSTER_NAME}" |
+    jq -r ".LaunchTemplates[].LaunchTemplateName" |
+    xargs -I{} aws ec2 delete-launch-template --launch-template-name {}
+
+Remove the Unnecessary Amazon EKS Add-ons
+
+➤ Now we'll remove the Amazon EKS Add-ons that are no longer required since they are provided as core components in EKS Auto Mode:
+
+aws eks delete-addon --cluster-name ${MIGRATION_CLUSTER_NAME} --addon-name metrics-server
+aws eks delete-addon --cluster-name ${MIGRATION_CLUSTER_NAME} --addon-name coredns
+aws eks delete-addon --cluster-name ${MIGRATION_CLUSTER_NAME} --addon-name vpc-cni
+aws eks delete-addon --cluster-name ${MIGRATION_CLUSTER_NAME} --addon-name kube-proxy
+aws eks delete-addon --cluster-name ${MIGRATION_CLUSTER_NAME} --addon-name aws-ebs-csi-driver
+aws eks delete-addon --cluster-name ${MIGRATION_CLUSTER_NAME} --addon-name eks-pod-identity-agent
+
+Delete the Managed Node Groups
+
+We have now successfully migrated the application and removed all the unnecessary controllers and add-ons. With EKS Auto Mode handling our compute needs, we no longer require either of the managed node groups.
+
+➤ Let's delete the node groups:
+
+eksctl delete nodegroup \
+  --region ${AWS_REGION} \
+  --cluster ${MIGRATION_CLUSTER_NAME} \
+  --name=apps-mng
+
+eksctl delete nodegroup \
+  --region ${AWS_REGION} \
+  --cluster ${MIGRATION_CLUSTER_NAME} \
+  --name=system-mng
+
+Removal of the node groups and termination of their instances may take a couple of minutes.
+
+➤ Verify that all non-EKS Auto Mode compute options were removed:
+
+kubectl get nodes -o json | jq -r '.items[].metadata.labels | ."kubernetes.io/hostname" + " | " + ."topology.kubernetes.io/zone" + " | " + (."eks.amazonaws.com/capacityType" // if ."eks.amazonaws.com/compute-type" == "fargate" then "FARGATE" else "KARPENTER" end) + " | " + (."eks.amazonaws.com/nodegroup" // if ."karpenter.sh/nodepool" then "nodepool: " + ."karpenter.sh/nodepool" else "profile: apps" end)' | column -t | sort -k 5
+
+Note that we've created the node groups using eksctl, so your process may slightly differ.
+Delete the Fargate Profile
+
+➤ Finally, let's delete the Fargate profile that is no longer needed:
+
+aws eks delete-fargate-profile \
+  --cluster-name ${MIGRATION_CLUSTER_NAME} \
+  --fargate-profile-name apps
