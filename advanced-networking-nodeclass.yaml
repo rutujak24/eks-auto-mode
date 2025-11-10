@@ -1,0 +1,18 @@
+apiVersion: eks.amazonaws.com/v1
+kind: NodeClass
+metadata:
+  name: advanced-networking
+spec:
+  role: 'workshop-team-stack-DemoClusterNodeRoleE31E9BBC-kMjSsO5XMzXS'
+  subnetSelectorTerms:
+    - tags:
+        kubernetes.io/role/internal-elb: '1'
+  securityGroupSelectorTerms:
+    - tags:
+        kubernetes.io/cluster/demo-cluster: owned
+  podSubnetSelectorTerms:
+    - tags:
+        advanced-networking: '1'
+  podSecurityGroupSelectorTerms:
+    - tags:
+        kubernetes.io/cluster/demo-cluster: owned
