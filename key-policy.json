@@ -1,0 +1,37 @@
+{
+    "Version": "2012-10-17",
+    "Id": "key-auto-policy-3",
+    "Statement": [
+        {
+            "Sid": "iam-kms",
+            "Effect": "Allow",
+            "Principal": {
+                "AWS": "arn:aws:iam::130116612911:root"
+            },
+            "Action": "kms:*",
+            "Resource": "*"
+        },
+        {
+            "Sid": "ec2-kms",
+            "Effect": "Allow",
+            "Principal": {
+                "AWS": "*"
+            },
+            "Action": [
+                "kms:Encrypt",
+                "kms:Decrypt",
+                "kms:ReEncrypt*",
+                "kms:GenerateDataKey*",
+                "kms:CreateGrant",
+                "kms:DescribeKey"
+            ],
+            "Resource": "*",
+            "Condition": {
+                "StringEquals": {
+                    "kms:CallerAccount": "130116612911",
+                    "kms:ViaService": "ec2.us-west-2.amazonaws.com"
+                }
+            }
+        }
+    ]
+}
