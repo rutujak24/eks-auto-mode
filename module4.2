@@ -1,0 +1,327 @@
+Enabling EKS Auto Mode
+
+Configuring the Cluster | Configuring EKS Auto Mode | Preparing the Application
+Configuring the Cluster
+
+Before enabling EKS Auto Mode on our cluster, we need to adjust certain IAM permissions to ensure its proper operation. This includes:
+
+    Updating the cluster's IAM role trust policy and permissions
+    Creating an IAM role for the EKS Auto Mode worker nodes
+
+Let's explore these permissions in more detail in the following sections.
+1. Update the Cluster IAM Role
+
+EKS Auto Mode includes several Kubernetes capabilities as core components. These components, that would otherwise have to be managed as add-ons or self-managed controllers, include built-in support for Pod IP address assignments, Pod network policies, local DNS services, GPU plug-ins, health checkers, and EBS CSI storage.
+
+To manage these components and ensure their function, EKS Auto Mode requires additional permissions, which are now a part of the cluster IAM role.
+
+As described in the EKS Auto Mode documentation 
+
+, the following IAM policies should be added to the cluster role, in addition to the existing AmazonEKSClusterPolicy:
+
+    AmazonEKSComputePolicy 
+
+AmazonEKSBlockStoragePolicy 
+AmazonEKSNetworkingPolicy 
+AmazonEKSLoadBalancingPolicy 
+
+In addition, EKS Auto Mode requires the sts:TagSession action to be added to the cluster IAM role's trust policy (you can view its current state in the IAM console).
+
+➤ Create a trust policy JSON file:
+
+cat << EOF > trust-policy.json
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Principal": {
+                "Service": "eks.amazonaws.com"
+            },
+            "Action": [
+                "sts:AssumeRole",
+                "sts:TagSession"
+            ]
+        }
+    ]
+}
+EOF
+
+➤ Update the cluster IAM role and remove the trust-policy.json file:
+
+aws iam update-assume-role-policy \
+  --role-name ${MIGRATION_CLUSTER_ROLE_NAME} \
+  --policy-document file://trust-policy.json
+
+rm trust-policy.json
+
+➤ Add the required permissions to the cluster IAM role by executing:
+
+for POLICY_ARN in \
+  "arn:aws:iam::aws:policy/AmazonEKSComputePolicy" \
+  "arn:aws:iam::aws:policy/AmazonEKSBlockStoragePolicy" \
+  "arn:aws:iam::aws:policy/AmazonEKSNetworkingPolicy" \
+  "arn:aws:iam::aws:policy/AmazonEKSLoadBalancingPolicy"
+do
+  echo "Attaching policy ${POLICY_ARN} to IAM role ${MIGRATION_CLUSTER_ROLE_NAME}..."
+  aws iam attach-role-policy --role-name ${MIGRATION_CLUSTER_ROLE_NAME} \
+    --policy-arn ${POLICY_ARN}
+done
+
+➤ Verify that the IAM role has been updated properly:
+
+aws iam get-role --role-name ${MIGRATION_CLUSTER_ROLE_NAME} | \
+  jq -r '.Role.AssumeRolePolicyDocument.Statement[].Action[]'
+
+aws iam list-attached-role-policies --role-name ${MIGRATION_CLUSTER_ROLE_NAME} | \
+  jq -r '.AttachedPolicies[].PolicyName'
+
+The output should include (note the AmazonEKSClusterPolicy that the role already had attached before):
+
+sts:AssumeRole
+sts:TagSession
+AmazonEKSClusterPolicy
+AmazonEKSNetworkingPolicy
+AmazonEKSComputePolicy
+AmazonEKSBlockStoragePolicy
+AmazonEKSLoadBalancingPolicy
+
+2. Create the Node IAM Role
+
+A Node IAM role contains the minimal permissions required for EKS components (kubelet and Pod Identity agent) to perform their function.
+
+➤ Create a trust policy JSON file:
+
+cat << EOF > trust-policy.json
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Principal": {
+                "Service": "ec2.amazonaws.com"
+            },
+            "Action": [
+                "sts:AssumeRole"
+            ]
+        }
+    ]
+}
+EOF
+
+➤ Create the Node IAM role and remove the trust-policy.json file:
+
+aws iam create-role \
+  --role-name ${MIGRATION_CLUSTER_NAME}-auto-mode-node-role \
+  --assume-role-policy-document file://trust-policy.json
+
+rm trust-policy.json
+
+➤ Attach the required policies:
+
+for POLICY_ARN in \
+  "arn:aws:iam::aws:policy/AmazonEKSWorkerNodeMinimalPolicy" \
+  "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPullOnly"
+do
+  echo "Attaching policy ${POLICY_ARN} to IAM role ${MIGRATION_CLUSTER_NAME}-auto-mode-node-role..."
+  aws iam attach-role-policy --role-name ${MIGRATION_CLUSTER_NAME}-auto-mode-node-role \
+    --policy-arn ${POLICY_ARN}
+done
+
+➤ Verify the created (or existing) role, its trust policy, and attached managed policies:
+
+aws iam get-role \
+  --role-name ${MIGRATION_CLUSTER_NAME}-auto-mode-node-role | \
+  jq -r '.Role.AssumeRolePolicyDocument.Statement[].Action'
+
+aws iam list-attached-role-policies \
+  --role-name ${MIGRATION_CLUSTER_NAME}-auto-mode-node-role | \
+  jq -r '.AttachedPolicies[].PolicyName'
+
+The command above should produce the following output:
+
+sts:AssumeRole
+AmazonEKSWorkerNodeMinimalPolicy
+AmazonEC2ContainerRegistryPullOnly
+
+We can now enable EKS Auto Mode.
+3. Enable Amazon EKS Auto Mode
+
+➤ Define the node role ARN as an environment variable:
+
+export NODE_ROLE_ARN=$(aws iam get-role \
+  --role-name ${MIGRATION_CLUSTER_NAME}-auto-mode-node-role \
+  --query "Role.Arn" --output text)
+
+➤ Execute the following command to enable EKS Auto Mode (and verify that there are no errors in the output):
+
+aws eks update-cluster-config \
+  --region ${AWS_REGION} \
+  --name ${MIGRATION_CLUSTER_NAME} \
+  --compute-config "{\"nodeRoleArn\": \"${NODE_ROLE_ARN}\", \"nodePools\": [\"system\"], \"enabled\": true}" \
+  --kubernetes-network-config '{"elasticLoadBalancing":{"enabled": true}}' \
+  --storage-config '{"blockStorage":{"enabled": true}}'
+
+➤ After 5 - 10 seconds, execute the following command to wait for the cluster EKS Auto Mode to become enabled:
+
+aws eks wait cluster-active --name ${MIGRATION_CLUSTER_NAME}
+
+You can also verify that the process of enabling EKS Auto Mode has started by navigating to the AWS EKS console 
+
+, selecting the migration cluster, and ensuring that the corresponding panel looks like this (note the spinning icon on the Manage button):
+
+Enabling EKS Auto Mode progress
+
+After a couple of minutes, the cluster should enable EKS Auto Mode:
+
+Enabled EKS Auto Mode
+
+Before proceeding with the migration, let's make sure the Auto Mode autoscaling configuration exists in the cluster.
+
+➤ Verify that all node pools (including those managed by the self-managed Karpenter) and node classes are fully operational (READY=True):
+
+kubectl get nodepool,nodeclass,ec2nodeclass
+
+You should see an output similar to the following, which shows the original self-managed Karpenter NodePool and EC2NodeClass, as well as the EKS Auto Mode NodePool and (a new CRD) NodeClass:
+
+NAME                           NODECLASS   NODES   READY   AGE
+nodepool.karpenter.sh/apps     apps        8       True    89m
+nodepool.karpenter.sh/system   default     0       True    8m47s
+
+NAME                                  ROLE                                    READY   AGE
+nodeclass.eks.amazonaws.com/default   migration-cluster-auto-mode-node-role   True    8m47s
+
+NAME                                  READY   AGE
+ec2nodeclass.karpenter.k8s.aws/apps   True    89m
+
+➤ Extract (if you already closed its tab in the browser) the application URL:
+
+kubectl get ingress -n apps retail-store-app-ui-main \
+  -o jsonpath="http://{.status.loadBalancer.ingress[*].hostname}{'\n'}"
+
+➤ Verify that the application is operational by Ctrl/Cmd-clicking the URL in the output (or refreshing the tab).
+
+We are now ready to start the migration process of our applications to EKS Auto Mode-managed instances.
+Configuring EKS Auto Mode
+
+EKS Auto Mode manages most infrastructure components automatically, while allowing customization to better fit the needs of the workloads.
+
+EKS Auto Mode includes two built-in NodePools (and a NodeClass) that define how the cluster compute capacity is provisioned, out of the box:
+
+    The system node pool, intended for cluster-critical applications
+    The general-purpose node pool
+
+While the general-purpose would work for most general applications' needs and help customers to get started (as seen in the Getting Started section of one of the previous modules), for the purposes of the migration, we will use a different node pool.
+
+Note that we opted out of creating the general-purpose node pool in the update-cluster-config command above.
+
+We will use the configuration of the apps node pool we already have as a starting point, with some minor adjustments, to create a new custom node pool for EKS Auto Mode.
+
+Note that EKS Auto Mode doesn't allow changing the general-purpose node pool and the corresponding default node class. Hence, it is recommended to analyze the Kubernetes scheduling constraints in use such as labels, taints, and tolerations, affinity, and anti-affinity rules, and create EKS Auto Mode node pools accordingly.
+Create a Custom EKS Auto Mode Configuration (NodeClass and NodePool)
+
+➤ Create the apps-auto-mode-np.yml file:
+
+cat << EOF > apps-auto-mode-np.yml
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: apps-auto-mode
+spec:
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 30s
+  template:
+    metadata:
+      labels:
+        role: apps-auto-mode
+    spec:
+      nodeClassRef:
+        group: eks.amazonaws.com
+        kind: NodeClass
+        name: default
+      taints:
+        - key: role
+          value: apps-auto-mode
+          effect: NoSchedule
+      requirements:
+        - key: kubernetes.io/arch
+          operator: In
+          values: [amd64, arm64]
+        - key: kubernetes.io/os
+          operator: In
+          values: [linux]
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: [on-demand]
+        - key: eks.amazonaws.com/instance-category
+          operator: In
+          values: [c, m, r]
+        - key: eks.amazonaws.com/instance-generation
+          operator: Gt
+          values: ["4"]
+EOF
+
+To adjust the apps NodePool to EKS Auto Mode, we’ve introduced the following changes:
+
+    Renamed the node pool to apps-auto-mode
+    Changed the node class reference to the EKS Auto Mode default NodeClass
+    Renamed the label and the taint values to apps-auto-mode
+    Removed the karpenter.k8s.aws/instance-generation as it is restricted by EKS Auto Mode
+
+➤ Deploy the node pool:
+
+kubectl apply -f apps-auto-mode-np.yml
+
+➤ Verify that all node pools and node classes are fully operational (READY=True):
+
+kubectl get nodepool,nodeclass,ec2nodeclass
+
+Note that at this point no instances are registered with any of the node pools:
+
+NAME                                   NODECLASS   NODES   READY   AGE
+nodepool.karpenter.sh/apps             apps        8       True    92m
+nodepool.karpenter.sh/apps-auto-mode   default     0       True    56s
+nodepool.karpenter.sh/system           default     0       True    12m
+
+NAME                                  ROLE                                    READY   AGE
+nodeclass.eks.amazonaws.com/default   migration-cluster-auto-mode-node-role   True    12m
+
+NAME                                  READY   AGE
+ec2nodeclass.karpenter.k8s.aws/apps   True    92m
+
+Preparing the Application
+
+Before applying any changes, we need to ensure that the components in the cluster can withstand them with minimal impact. If we were to simply delete the nodes, all Pods associated with the nodes would be terminated and need to be re-scheduled at the same time, causing disruption to their services.
+
+In Kubernetes, there are several ways of controlling disruptions 
+and the decision to apply them depends on the type of disruption 
+
+we are about to introduce.
+
+These ways are PodDisruptionBudgets 
+and Deployment strategy 
+
+.
+
+Since our application components are deployed using Helm, which updates the Deployment resource, we will use a Deployment strategy, which is already included in our application components and looks like this:
+
+...
+strategy:
+  rollingUpdate:
+    maxUnavailable: 1
+  type: RollingUpdate...
+
+Note that while the above strategy suits our needs in the context of the workshop, for your applications, you should create strategies that match your applications' requirements.
+
+In addition to ensuring a controlled migration process above, we also need to migrate the network resources created by/for the application components.
+
+Our retail store demo application defines an Ingress 
+
+resource to expose its components to external traffic.
+
+This Ingress is then handled by the self-managed AWS Load Balancer Controller to provision the Application Load Balancer above and define rules according to the Ingress definitions.
+
+We will discuss migrating the network components in greater detail in a dedicated section further in the workshop, but the process will rely on DNS migration from the current setup to a network path we will create by leveraging the EKS Auto Mode load balancing capabilities.
+
+With EKS Auto Mode enabled and the application prepared, we can move to migrating the application components, compute option by compute option.
