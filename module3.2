@@ -1,0 +1,79 @@
+Upgrading the cluster
+
+Upgrade | Summary
+Upgrade the cluster
+
+In this section of the workshop, we'll gain hands-on experience with Amazon EKS Auto Mode's automatic cluster infrastructure updates. We'll begin by updating the control plane.
+Check Current Versions
+
+➤ First, let's check the current Amazon EKS control plane version:
+
+aws eks describe-cluster --region $AWS_REGION --name $DEMO_CLUSTER_NAME --query "cluster.version" --output text
+
+This is the output:
+
+1.32
+
+We can see that our Amazon EKS control plane is running Amazon EKS version 1.32.
+
+➤ Now, let's observe the current worker nodes (data plane) version:
+
+kubectl get nodes
+
+The output should be similar to the following:
+
+NAME                  STATUS   ROLES    AGE   VERSION
+i-01c27cd2a458478a7   Ready    <none>   78m   v1.32.3-eks-156189c
+i-06a7bbee7d6f29f45   Ready    <none>   56m   v1.32.3-eks-156189c
+...
+
+We can see that the worker nodes are also running Amazon EKS version 1.32.
+Look for deprecated APIs and new versions for additional components
+
+Under the shared responsibility model, we should review the Kubernetes release 
+
+page, and for each version we're upgrading to, verify that there are no API deprecations or changes that might affect our business applications.
+
+Amazon EKS also provides the Upgrade Insights 
+
+tool (both in the AWS EKS console under the cluster's Observability dashboard and via the AWS API). This tool allows you to identify issues that could impact your ability to upgrade to new versions of Kubernetes.
+
+Additionally, we need to check for new versions of any 3rd party or community add-ons installed in our cluster, and upgrade them after completing the EKS cluster upgrade.
+Upgrade the control plane
+
+Let's upgrade our Amazon EKS control plane version to 1.33.
+
+Note: While there are multiple ways to upgrade an Amazon EKS control plane (using eksctl, AWS Console, AWS CLI, or Infrastructure as Code), we'll use the AWS CLI for simplicity in this workshop.
+
+➤ Execute the following command:
+
+aws eks update-cluster-version --region $AWS_REGION --name $DEMO_CLUSTER_NAME --kubernetes-version 1.33
+
+You will see output similar to this:
+
+{
+    "update": {
+        "id": "7e15217f-3ed4-3eaa-91e2-b1fc05bd1c89",
+        "status": "InProgress",
+        "type": "VersionUpdate",
+        "params": [
+            {
+                "type": "Version",
+                "value": "1.33"
+            },
+            {
+                "type": "PlatformVersion",
+                "value": "eks.4"
+            }
+        ],
+        "createdAt": "2025-06-08T16:32:24.518000+00:00",
+        "errors": []
+    }
+}
+
+In the output, we can see the Amazon EKS version is being updated to 1.33. Also note the PlatformVersion parameter which is documented in the Amazon EKS platform version 
+
+documentation. At the time of creating this workshop, this output is eks.4, but it may differ in future platform versions of Amazon EKS.
+Summary
+
+In this section we've initiated an upgrade of the Amazon EKS Auto Mode cluster control plane from version 1.32 to 1.33. With Auto Mode, AWS will handle the worker node upgrades automatically, demonstrating the zero-touch infrastructure update capability that makes Kubernetes operations simpler.
