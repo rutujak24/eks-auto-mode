@@ -1,0 +1,334 @@
+Cluster configuration
+
+Setup | Overview | Cluster Add-ons | Self-Managed Karpenter Configuration | Demo Application
+Setup
+
+During the provisioning of this workshop we've created several Amazon EKS clusters, with one specifically intended for this module.
+
+➤ Before we begin, let's switch the current kubeconfig context by executing:
+
+kubectl config use-context arn:aws:eks:${AWS_REGION}:${AWS_ACCOUNT_ID}:cluster/${MIGRATION_CLUSTER_NAME}
+
+You should receive an output similar to:
+
+Switched to context "<a cluster ARN>".
+
+Verify the cluster setup by executing the following command:
+
+kubectl get nodes -o json | jq -r '.items[].metadata.labels | ."kubernetes.io/hostname" + " | " + ."topology.kubernetes.io/zone" + " | " + (."eks.amazonaws.com/capacityType" // if ."eks.amazonaws.com/compute-type" == "fargate" then "FARGATE" else "KARPENTER" end) + " | " + (."eks.amazonaws.com/nodegroup" // if ."karpenter.sh/nodepool" then "nodepool: " + ."karpenter.sh/nodepool" else "profile: apps" end)' | column -t | sort -k 5
+
+The command above shows the distribution of compute instances in the cluster across compute options and should look similar to the following:
+
+fargate-ip-192-168-116-56.us-west-2.compute.internal   |  us-west-2c  |  FARGATE    |  profile:    apps
+fargate-ip-192-168-180-168.us-west-2.compute.internal  |  us-west-2b  |  FARGATE    |  profile:    apps
+fargate-ip-192-168-191-115.us-west-2.compute.internal  |  us-west-2b  |  FARGATE    |  profile:    apps
+ip-192-168-100-194.us-west-2.compute.internal          |  us-west-2c  |  KARPENTER  |  nodepool:   apps
+ip-192-168-155-246.us-west-2.compute.internal          |  us-west-2a  |  KARPENTER  |  nodepool:   apps
+...
+ip-192-168-173-151.us-west-2.compute.internal          |  us-west-2b  |  KARPENTER  |  nodepool:   apps
+ip-192-168-28-67.us-west-2.compute.internal            |  us-west-2c  |  ON_DEMAND  |  apps-mng
+ip-192-168-51-140.us-west-2.compute.internal           |  us-west-2a  |  ON_DEMAND  |  apps-mng
+ip-192-168-83-58.us-west-2.compute.internal            |  us-west-2b  |  ON_DEMAND  |  apps-mng
+ip-192-168-26-158.us-west-2.compute.internal           |  us-west-2c  |  ON_DEMAND  |  system-mng  
+ip-192-168-33-46.us-west-2.compute.internal            |  us-west-2a  |  ON_DEMAND  |  system-mng  
+ip-192-168-86-255.us-west-2.compute.internal           |  us-west-2b  |  ON_DEMAND  |  system-mng  
+
+Note that self-managed Karpenter nodes distribution may differ due to the dynamic nature of Karpenter provision and consolidation (hence ... in the output above), but the nodes should follow the same approximate distribution.
+Overview
+
+The compute options in the cluster, as shown in the output above, include:
+
+    An AWS Fargate profile 
+
+that allows us to target specific applications to be scheduled on AWS Fargate 
+. These are the lines marked by profile: apps.
+Several Amazon EKS managed node groups 
+that host the cluster operational software and some of the applications. These are the lines marked by system-mng for the cluster-critical managed node group and apps-mng for the applications' managed node group.
+Self-managed Karpenter 
+
+    nodes that host the rest of the applications in the cluster. These are marked by nodepool: apps.
+
+The cluster also contains the required Amazon EKS add-ons 
+
+:
+
+    The Amazon VPC CNI plugin for Kubernetes 
+
+add-on, which provides native VPC networking for the cluster
+The CoreDNS 
+add-on, which serves as the Kubernetes cluster DNS server
+The Kube-proxy 
+add-on, which maintains network rules on each Amazon EC2 worker node
+The EKS Pod Identity Agent 
+
+    add-on, which manages AWS credentials for the cluster applications
+
+In addition, the cluster includes a self-managed AWS Load Balancer Controller 
+, that provisions and configures Elastic Load Balancers (Network Load Balancers 
+for Service resources and Application Load Balancers 
+
+for Ingress resources), to expose the cluster applications to traffic.
+
+➤ We can validate that all the applications and controllers are operational (in a Running state) by executing:
+
+kubectl get pods -A
+
+Note that due to the provision process, some Pods may have a non-zero RESTARTS count. As long as these aren't recent (dozens of minutes ago), your cluster is in the desired state.
+Cluster Add-ons
+
+The cluster add-ons mentioned above are either DaemonSets (VPC CNI, kube-proxy, and Pod Identity agent) or Deployments (CoreDNS, Karpenter, and Application Load Balancer Controller) and thus their required compute capacity is handled differently.
+
+The DaemonSets will be deployed on every worker node in the cluster, while the rest will be deployed on a specifically configured system-mng managed node group.
+
+The system-mng node group is provisioned along with the cluster and its configuration can be represented, for reference, by the following CloudFormation snippet:
+
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+...
+  SystemNodegroup:
+    Type: AWS::EKS::Nodegroup
+    Properties:
+      NodegroupName: system-mng
+      ...
+      AmiType: AL2023_ARM_64_STANDARD
+      NodeRole: !GetAtt NodeRole.Arn
+      InstanceTypes:
+        - t4g.small
+      ScalingConfig:
+        MinSize: 0
+        DesiredSize: 3
+        MaxSize: 3
+      Labels:
+        role: system-mng
+      Taints:
+        - Key: role
+          Value: system-mng
+          Effect: NO_SCHEDULE
+      Subnets:
+        ...
+...
+
+Note the role=system label and the role=system taint in the configuration of the managed node group. These are set to ensure that only the selected software/applications can be scheduled onto this node group's instances.
+
+The relevant add-ons then define a matching toleration and target the node group above using a matching node selector.
+
+➤ View the node group and its configuration in the AWS EKS console 
+
+and navigating to the workshop migration cluster, which should look like this:
+
+system-mng Managed Node Group
+system-mng Managed Node Group Labels system-mng Managed Node Group Taints
+
+➤ Verify the relevant, non-DaemonSet add-ons deployment by executing the following command:
+
+export SYSTEM_NODES=$(kubectl get nodes -o json | jq -r '[.items[].metadata.labels | select(."eks.amazonaws.com/nodegroup" == "system-mng") | ."kubernetes.io/hostname"] | join("\\|")')
+export DAEMONSETS_PODS=$(kubectl get ds -n kube-system -o json | jq -r '[.items[].metadata.name] | join ("\\|")')
+
+kubectl get pods --all-namespaces -o wide | grep "${SYSTEM_NODES}" | grep -v "${DAEMONSETS_PODS}"
+
+The output should show at least CoreDNS, Karpenter, and Application Load Balancer Controller, similar to the following:
+
+kube-system   aws-load-balancer-controller-7df858d998-g95mt   1/1     Running   0          7h44m   192.168.174.154   ip-192-168-171-81.us-west-2.compute.internal            <none>           <none>
+kube-system   aws-load-balancer-controller-7df858d998-lt62r   1/1     Running   0          7h44m   192.168.126.38    ip-192-168-121-172.us-west-2.compute.internal           <none>           <none>
+kube-system   coredns-7d597b58bc-5ftmq                        1/1     Running   0          7h59m   192.168.122.77    ip-192-168-121-172.us-west-2.compute.internal           <none>           <none>
+kube-system   coredns-7d597b58bc-rjts4                        1/1     Running   0          7h59m   192.168.122.238   ip-192-168-121-172.us-west-2.compute.internal           <none>           <none>
+kube-system   ebs-csi-controller-86cbbcbb67-cltl2             6/6     Running   0          7h46m   192.168.142.236   ip-192-168-150-45.us-west-2.compute.internal            <none>           <none>
+kube-system   ebs-csi-controller-86cbbcbb67-rzvks             6/6     Running   0          7h46m   192.168.168.215   ip-192-168-171-81.us-west-2.compute.internal            <none>           <none>
+kube-system   karpenter-df586dcf5-4rdrv                       1/1     Running   0          7h44m   192.168.184.184   ip-192-168-171-81.us-west-2.compute.internal            <none>           <none>
+kube-system   karpenter-df586dcf5-slc6k                       1/1     Running   0          7h44m   192.168.154.243   ip-192-168-150-45.us-west-2.compute.internal            <none>           <none>
+kube-system   metrics-server-76dfb8cb4b-kfkjw                 1/1     Running   0          7h59m   192.168.103.3     ip-192-168-121-172.us-west-2.compute.internal           <none>           <none>
+kube-system   metrics-server-76dfb8cb4b-xlj6b                 1/1     Running   0          7h59m   192.168.122.113   ip-192-168-121-172.us-west-2.compute.internal           <none>           <none>
+
+Self-Managed Karpenter Configuration
+
+To allow the self-managed Karpenter to provision instances for our applications' Pods, we need to define at least one NodeClass and one NodePool.
+
+The configuration applied to the cluster can be represented, for reference, by the following partial snippet:
+
+EC2NodeClass:
+
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: apps
+spec:
+  amiSelectorTerms:
+    - alias: al2023@latest
+  role: KarpenterNodeRole-${MIGRATION_CLUSTER_NAME}
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: ${MIGRATION_CLUSTER_NAME}
+        Name: "*/SubnetPrivate*"
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: ${MIGRATION_CLUSTER_NAME}
+
+NodePool:
+
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+32
+33
+34
+35
+36
+37
+38
+39
+40
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: apps
+spec:
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 30s
+  template:
+    metadata:
+      labels:
+        role: apps-karpenter
+    spec:
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: apps
+      taints:
+        - key: role
+          value: apps-karpenter
+          effect: NoSchedule
+      requirements:
+        - key: kubernetes.io/arch
+          operator: In
+          values: [amd64, arm64]
+        - key: kubernetes.io/os
+          operator: In
+          values: [linux]
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: [on-demand]
+        - key: node.kubernetes.io/instance-category
+          operator: In
+          values: [c, m, r]
+        - key: karpenter.k8s.aws/instance-generation
+          operator: Gt
+          values: ['4']
+        - key: karpenter.k8s.aws/instance-size
+          operator: NotIn
+          values: [nano, micro, small, medium]
+
+Note the role=apps-karpenter label and the role=apps-karpenter taint in the configuration of the node pool above. These are set, in the same manner as the system-mng node group above, to ensure that only the selected applications can be scheduled using this Karpenter node pool.
+Demo Application
+
+To demonstrate the migration process, we will use the demo retail application – a sample application designed to illustrate container-related concepts on AWS.
+
+➤ We can explore the application by executing the command below, Ctrl/Cmd-clicking the URL in the output, and adding a couple of items to the cart:
+
+kubectl get ingress -n apps retail-store-app-ui-main \
+  -o jsonpath="http://{.status.loadBalancer.ingress[*].hostname}{'\n'}"
+
+The application 
+
+contains several components in various languages and frameworks that use pre-built container images for both x86-64 and ARM64 CPU architectures:
+
+Sample Retail Application
+
+The application components are deployed as follows:
+Component	Compute Option
+Orders	Fargate
+Catalog	Managed Node Group
+Catalog MySQL database	Managed Node Group
+Checkout	Self-Managed Karpenter
+Carts	Self-Managed Karpenter
+UI	Self-Managed Karpenter
+
+➤ Print out the distribution of instances across all capacity types again by executing the following command:
+
+kubectl get nodes -o json | jq -r '.items[].metadata.labels | ."kubernetes.io/hostname" + " | " + ."topology.kubernetes.io/zone" + " | " + (."eks.amazonaws.com/capacityType" // if ."eks.amazonaws.com/compute-type" == "fargate" then "FARGATE" else "KARPENTER" end) + " | " + (."eks.amazonaws.com/nodegroup" // if ."karpenter.sh/nodepool" then "nodepool: " + ."karpenter.sh/nodepool" else "profile: apps" end)' | column -t | sort -k 5
+
+This should produce a result similar to the following:
+
+fargate-ip-192-168-100-164.us-west-2.compute.internal  |  us-west-2a  |  FARGATE    |  profile:    apps
+fargate-ip-192-168-138-127.us-west-2.compute.internal  |  us-west-2b  |  FARGATE    |  profile:    apps
+fargate-ip-192-168-152-183.us-west-2.compute.internal  |  us-west-2b  |  FARGATE    |  profile:    apps
+ip-192-168-103-234.us-west-2.compute.internal          |  us-west-2a  |  KARPENTER  |  nodepool:   apps
+ip-192-168-131-142.us-west-2.compute.internal          |  us-west-2b  |  KARPENTER  |  nodepool:   apps
+ip-192-168-190-197.us-west-2.compute.internal          |  us-west-2c  |  KARPENTER  |  nodepool:   apps
+ip-192-168-104-189.us-west-2.compute.internal          |  us-west-2a  |  ON_DEMAND  |  apps-mng
+ip-192-168-132-240.us-west-2.compute.internal          |  us-west-2b  |  ON_DEMAND  |  apps-mng
+ip-192-168-163-151.us-west-2.compute.internal          |  us-west-2c  |  ON_DEMAND  |  apps-mng
+ip-192-168-121-172.us-west-2.compute.internal          |  us-west-2a  |  ON_DEMAND  |  system-mng  
+ip-192-168-150-45.us-west-2.compute.internal           |  us-west-2b  |  ON_DEMAND  |  system-mng  
+ip-192-168-171-81.us-west-2.compute.internal           |  us-west-2c  |  ON_DEMAND  |  system-mng  
+
+➤ Verify that all the components of the application are deployed as described in the table above:
+
+export DAEMONSETS_PODS=$(kubectl get ds -n kube-system -o json | jq -r '[.items[].metadata.name] | join ("\\|")')
+kubectl get pods -n apps -o wide | grep -v "${DAEMONSETS_PODS}"
+
+Now that we have an overall view of the application, we can start the migration process by enabling the EKS Auto Mode for the cluster.
