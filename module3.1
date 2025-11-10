@@ -1,0 +1,79 @@
+Understanding upgrades with Amazon EKS Auto Mode
+
+Overview | Upgrade flow process | Time controls | Summary
+Overview
+
+Cluster upgrade flow
+
+Amazon EKS Auto Mode revolutionizes Kubernetes cluster management by providing zero-touch updates for our entire cluster infrastructure.
+Upgrade flow process
+1. Version Verification
+
+    Check the latest available Amazon EKS version and verify compatibility with current applications
+    Initiate a version update when needed
+
+2. Control Plane and cluster component updates
+
+    Initiate control plane version upgrade
+    With Auto Mode, any of the managed cluster capabilities will also be automatically updated to ensure compatibility across versions
+
+3. Data Plane Update
+
+Node rolling update
+
+Graceful node updates follow this process:
+
+    Node replacement with latest AMIs using Karpenter's Drift management capability
+    Rolling update strategy
+    Respect for Pod Disruption Budgets (PDBs)
+
+Time controls
+Expiration Settings
+
+    Default: worker nodes will be fully automatically upgraded no later than 14 days
+    Custom NodePools: Up to 21 days
+
+Termination Grace Period
+
+Amazon EKS Auto Mode sets a default of 24 hours for terminationGracePeriod. This period defines the amount of time a Node can be drained before Karpenter forcibly cleans up the node. During draining, pods blocking eviction (such as those with PDBs and do-not-disrupt annotations) will be respected until the terminationGracePeriod is reached, after which those pods will be forcibly deleted.
+Disruption Controls
+
+We can limit the rate at which Amazon EKS Auto Mode disrupts nodes through the NodePool's spec.disruption.budgets. Disruption budgets allow us to control the rate of worker node upgrades or ensure upgrades only happen during specific dates and times (using schedule).
+
+Disruption budgets can be configured for the following disruption reasons:
+
+    Empty - when a node is has no running pods
+    Underutilized - when a node can be removed or replaced with a smaller instance type
+    Drifted - when a node has diverged from its desired state (for example when the EKS control plane version differs from worker node version)
+
+By default, the Amazon EKS Auto Mode general-purpose NodePool has the following disruption budget:
+
+...
+spec:
+  disruption:
+    consolidateAfter: 0s
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    budgets:
+    - nodes: 10%
+...
+
+With this budget, Amazon EKS Auto Mode will disrupt at most 10% of active nodes at a time.
+
+...
+spec:
+  disruption:
+    consolidateAfter: 0s
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    budgets:
+    - nodes: 10%
+    - schedule: 0 9 * * mon-fri
+      duration: 8h
+      nodes: "0"
+      reasons:
+      - Drifted
+...
+
+With this configuration, we limit Amazon EKS Auto Mode from disrupting nodes ("0") during weekday business hours if Drift is triggered, while allowing at most 10% of active nodes to be disrupted at all other times.
+Summary
+
+Now that we understand how Amazon EKS Auto Mode handles upgrades, let's proceed to upgrading the cluster to the most recent Kubernetes version.
