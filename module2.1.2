@@ -1,0 +1,285 @@
+Autoscaling
+
+Overview | Horizontal Pod Autoscaling | Summary
+
+This section will guide you through the basics of EKS Auto Mode and explore, in details, application and cluster autoscaling.
+Overview
+Disruptions in EKS Auto Mode
+
+Before we dive into autoscaling, let's first understand how disruptions 
+
+are managed in EKS Auto Mode. Disruptions can occur in situations such as when nodes are scaled down to reduce cluster costs (like bin-packing), or hit their maximum lifetime (expiry date). This potentially impacts the running pods on those nodes. EKS Auto Mode uses Karpenter under the hood to optimize node scaling and manage these disruptions effectively.
+
+Karpenter manages node disruptions through three key mechanisms: expiration, drift detection, and consolidation, with the latter being the focus of this section, as more relevant to autoscaling.
+Consolidation
+
+Consolidation works by continuously monitoring the utilization of nodes and pods in the cluster. When nodes become underutilized or idle, Karpenter initiates a consolidation process to optimize cluster resources. This involves removing nodes without active workloads, efficiently bin-packing pods onto existing nodes where capacity permits, and performing graceful node draining by carefully evicting and rescheduling pods to maintain application availability throughout the consolidation process.
+
+Below you can see the highlighted configuration of the disruption block in the provided general-purpose NodePool that is created and managed by EKS Auto Mode
+
+➤ Get the NodePool configuration:
+
+kubectl get nodepools general-purpose -o yaml
+
+This should show the following output:
+
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  annotations:
+    karpenter.sh/nodepool-hash: "4012513481623584108"
+    karpenter.sh/nodepool-hash-version: v3
+  creationTimestamp: "2025-01-15T09:32:29Z"
+  generation: 1
+  labels:
+    app.kubernetes.io/managed-by: eks
+  name: general-purpose
+  resourceVersion: "241001"
+  uid: 9b1c4ad0-d42d-4c63-bd96-b0a201aeec0e
+spec:
+  disruption:
+    budgets:
+    - nodes: 10%
+    consolidateAfter: 30s
+    consolidationPolicy: WhenEmptyOrUnderutilized
+  template:
+    metadata: {}
+    spec:
+      expireAfter: 336h
+      nodeClassRef:
+        group: eks.amazonaws.com
+        kind: NodeClass
+        name: default
+      requirements:
+      - key: karpenter.sh/capacity-type
+        operator: In
+        values:
+        - on-demand
+      - key: eks.amazonaws.com/instance-category
+        operator: In
+        values:
+        - c
+        - m
+        - r
+      - key: eks.amazonaws.com/instance-generation
+        operator: Gt
+        values:
+        - "4"
+      - key: kubernetes.io/arch
+        operator: In
+        values:
+        - amd64
+      - key: kubernetes.io/os
+        operator: In
+        values:
+        - linux
+      terminationGracePeriod: 24h0m0s
+
+The configuration property WhenEmptyOrUnderutilized ensures that Karpenter will consider all nodes for consolidation and attempt to remove or replace nodes when it discovers that a node is empty or under-utilized and could be removed or replaced to reduce cost. expireAfter is set to a custom value so that nodes are terminated automatically after 336 hours (14 days). The budget configuration block controls the speed with which Karpenter can scale down nodes.
+Horizontal Pod Autoscaling
+
+In this lab, we'll explore how the Horizontal Pod Autoscaler (HPA) automatically scales pods in Kubernetes based on observed metrics. The HPA consists of a resource definition and a controller that periodically checks resource utilization (such as CPU, memory, or custom metrics) against user-defined targets and adjusts the number of replicas accordingly.
+
+The Metrics Server component is essential for collecting and aggregating resource usage data from the cluster and providing HPA with the necessary metrics to make scaling decisions.
+Install Metrics Server
+
+To enable application-level autoscaling in EKS Auto Mode, we need to install the Metrics Server. AWS offers a streamlined installation process through Community Add-ons 
+
+to simplify deployment and management.
+
+We can create an Amazon EKS add-on using eksctl, the AWS Management Console, or the AWS CLI. For add-ons requiring an IAM role, refer to Available Amazon EKS add-ons from AWS 
+
+for details about creating the role.
+Create add-on (eksctl)
+
+➤ Use eksctl to install the metrics-server addon:
+
+eksctl create addon --name metrics-server --cluster ${DEMO_CLUSTER_NAME}
+
+Creating the metrics-server add-on should take about 1 minute.
+
+The output should look similar to the following:
+
+2025-01-16 00:06:09 [ℹ]  Kubernetes version "1.32" in use by cluster "demo-cluster"
+2025-01-16 00:06:09 [ℹ]  creating addon: metrics-server
+2025-01-16 00:07:00 [ℹ]  addon "metrics-server" active
+
+➤ After the above installation commands completes, let's confirm that the Metrics Server is running:
+
+kubectl get deployment metrics-server -n kube-system
+
+with the expected output:
+
+NAME             READY   UP-TO-DATE   AVAILABLE   AGE
+metrics-server   2/2     2            2           99s
+
+To get a view of the metrics that HPA will use to drive its scaling behavior, use the kubectl top command.
+
+➤ For example, the below commands will show the resource utilization of the nodes and UI component pods in our cluster:
+
+kubectl top node
+kubectl top pods -l app.kubernetes.io/name=ui
+
+The result should be similar to the following:
+
+NAME                  CPU(cores)   CPU%   MEMORY(bytes)   MEMORY%
+i-054327326888bc1a7   30m          1%     1334Mi          43%
+i-071d1c6176dcb458c   31m          1%     1381Mi          45%
+i-0c448d79e8e7bb464   26m          1%     1518Mi          49%
+NAME                                   CPU(cores)   MEMORY(bytes)
+retail-store-app-ui-7fbf6d97b9-cc784   2m           214Mi
+retail-store-app-ui-7fbf6d97b9-dx2kv   4m           214Mi
+retail-store-app-ui-7fbf6d97b9-dztkw   2m           220Mi
+retail-store-app-ui-7fbf6d97b9-ff4fv   1m           219Mi
+retail-store-app-ui-7fbf6d97b9-hkqmv   2m           218Mi
+retail-store-app-ui-7fbf6d97b9-k7qdk   2m           220Mi
+retail-store-app-ui-7fbf6d97b9-kdh82   2m           220Mi
+retail-store-app-ui-7fbf6d97b9-kn5md   1m           220Mi
+retail-store-app-ui-7fbf6d97b9-nz8kt   2m           225Mi
+retail-store-app-ui-7fbf6d97b9-phchj   2m           224Mi
+retail-store-app-ui-7fbf6d97b9-vqpq2   2m           223Mi
+retail-store-app-ui-7fbf6d97b9-xd62b   2m           214Mi
+
+Configure HPA
+
+Currently, there are no resources in our cluster that enable Horizontal Pod Autoscaling.
+
+➤ Let's verify this by executing:
+
+kubectl get hpa --all-namespaces
+
+with the expected output:
+
+No resources found
+
+Now, we'll add autoscaling configurations to the UI component based on its CPU usage by updating our values-ui.yaml file with autoscaling config and re-deploying the UI component using the corresponding Helm chart.
+Configure and re-deploy the UI component
+
+cat << EOF >~/environment/values-ui.yaml
+app:
+  theme: default
+  endpoints:
+    catalog: http://retail-store-app-catalog:80
+    carts: http://retail-store-app-carts:80
+    checkout: http://retail-store-app-checkout:80
+    orders: http://retail-store-app-orders:80
+
+topologySpreadConstraints:
+  - maxSkew: 1
+    minDomains: 3
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: DoNotSchedule
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: ui
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/instance: retail-store-app-ui
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 15
+  targetCPUUtilizationPercentage: 80
+EOF
+
+helm upgrade -f ~/environment/values-ui.yaml retail-store-app-ui oci://public.ecr.aws/aws-containers/retail-store-sample-ui-chart --version ${RETAIL_STORE_APP_HELM_CHART_VERSION} --hide-notes
+
+The result should be similar to the following:
+
+Pulled: public.ecr.aws/aws-containers/retail-store-sample-ui-chart:1.1.0
+Digest: sha256:3862f8ecac30a8cecc0825f5a654c2a8e31871b0342ffe3b5a84b1db1e10a7dd
+Release "retail-store-app-ui" has been upgraded. Happy Helming!
+NAME: retail-store-app-ui
+LAST DEPLOYED: Fri Jan 17 15:13:18 2025
+NAMESPACE: default
+STATUS: deployed
+REVISION: 3
+
+The HPA resource will maintain at least 3 replicas and will scale up to 15 replicas when the average CPU Utilization reaches 80%.
+
+➤ Let's view the HPA resource:
+
+kubectl get hpa  
+
+The expected output should be similar to this (the amount of replicas may be lower and the TARGETS field set to <unknown>/80%) while the pods are created):
+
+NAME                  REFERENCE                        TARGETS       MINPODS   MAXPODS   REPLICAS   AGE
+retail-store-app-ui   Deployment/retail-store-app-ui   cpu: 2%/80%   3         15        3          71s
+
+Wait for the kubectl get hpa command to show an output similar to the above (instead of cpu:<unknown>/80%) in the TARGET columns, before continuing to the next section.
+Generate load
+
+To observe HPA scale out in response to our configured policy, we need to generate load on our application. We'll do this by calling the home page of the workload with hey 
+
+.
+
+The following command will run the load generator as a Pod in the cluster with:
+
+    10 workers running concurrently
+    Sending 10 queries per second each
+    Running for a maximum of 4 minutes
+
+➤ Apply the load:
+
+kubectl run load-generator \
+ --image=williamyeh/hey:latest \
+ --restart=Never -- -c 10 -q 10 -z 4m http://retail-store-app-ui/utility/stress/200000
+
+Now that we have requests hitting our application, we can watch the HPA resource to follow its progress.
+
+➤ Execute the following command:
+
+kubectl get hpa retail-store-app-ui --watch  
+
+As the load is applied and the HPA adds new replicas, the output should become similar to:
+
+NAME                  REFERENCE                        TARGETS       MINPODS   MAXPODS   REPLICAS   AGE
+retail-store-app-ui   Deployment/retail-store-app-ui   cpu: 6%/80%   3         15        3          2m47s
+retail-store-app-ui   Deployment/retail-store-app-ui   cpu: 2%/80%   3         15        3          3m1s
+retail-store-app-ui   Deployment/retail-store-app-ui   cpu: 59%/80%   3         15        3          3m31s
+retail-store-app-ui   Deployment/retail-store-app-ui   cpu: 437%/80%   3         15        3          3m46s
+retail-store-app-ui   Deployment/retail-store-app-ui   cpu: 585%/80%   3         15        6          4m1s
+retail-store-app-ui   Deployment/retail-store-app-ui   cpu: 375%/80%   3         15        12         4m16s
+retail-store-app-ui   Deployment/retail-store-app-ui   cpu: 229%/80%   3         15        15         4m31s
+retail-store-app-ui   Deployment/retail-store-app-ui   cpu: 171%/80%   3         15        15         4m46s
+retail-store-app-ui   Deployment/retail-store-app-ui   cpu: 207%/80%   3         15        15         5m1s
+retail-store-app-ui   Deployment/retail-store-app-ui   cpu: 160%/80%   3         15        15         5m16s
+retail-store-app-ui   Deployment/retail-store-app-ui   cpu: 152%/80%   3         15        15         5m31s
+retail-store-app-ui   Deployment/retail-store-app-ui   cpu: 133%/80%   3         15        15         5m46s
+retail-store-app-ui   Deployment/retail-store-app-ui   cpu: 135%/80%   3         15        15         6m1s
+retail-store-app-ui   Deployment/retail-store-app-ui   cpu: 136%/80%   3         15        15         6m17s
+retail-store-app-ui   Deployment/retail-store-app-ui   cpu: 144%/80%   3         15        15         6m32s
+retail-store-app-ui   Deployment/retail-store-app-ui   cpu: 152%/80%   3         15        15         6m47s
+retail-store-app-ui   Deployment/retail-store-app-ui   cpu: 156%/80%   3         15        15         7m2s
+retail-store-app-ui   Deployment/retail-store-app-ui   cpu: 157%/80%   3         15        15         7m17s
+retail-store-app-ui   Deployment/retail-store-app-ui   cpu: 149%/80%   3         15        15         7m32s
+retail-store-app-ui   Deployment/retail-store-app-ui   cpu: 36%/80%    3         15        15         7m47s
+retail-store-app-ui   Deployment/retail-store-app-ui   cpu: 1%/80%     3         15        15         8m2s
+retail-store-app-ui   Deployment/retail-store-app-ui   cpu: 1%/80%     3         15        15         8m32s
+
+You can see in the output above how the CPU utilization gradually grows with the load and causes HPA to add more replicas of the UI component to accommodate that load.
+
+➤ You can watch the Pods scaling by executing the following command:
+
+watch -t kubectl get pods -l app.kubernetes.io/instance=retail-store-app-ui
+
+➤ In another VS Code terminal, we can also observe whether EKS Auto Mode adds more nodes to host these replicas:
+
+watch -t kubectl get nodes
+
+Note that due to dynamic nature of the provisioned instances, it is possible that the current compute can accommodate all 15 UI component replicas.
+
+➤ Once we observed the autoscaling behavior, we can end the watch with Ctrl+C and stop the load generator:
+
+kubectl delete pod load-generator
+
+Once the generator is removed, you can observe the HPA removing the now-unnecessary replicas.
+Summary
+
+In this lab, we explored EKS Auto Mode's scaling capabilities through two main features: Karpenter's node-level disruption management and consolidation, and pod-level Horizontal Pod Autoscaling (HPA). We implemented and tested these features by leveraging the general-purpose NodePool's consolidation policies, setting up HPA for our UI application with specific scaling thresholds, and demonstrated automatic scaling in action using a load generator to trigger scale-out events.
+
+In the next section, we will focus on compute customization in EKS Auto Mode. We'll explore how to optimize both performance and cost by configuring specific compute requirements for our applications using Graviton and Spot Instances.
