@@ -1,0 +1,210 @@
+Migrating Networking Resources
+
+Create New Load Balancers | Migrate to the New Load Balancers
+
+In this section, we will demonstrate how to migrate networking resources, specifically AWS Application Load Balancer (ALB) and Network Load Balancer (NLB).
+
+When using the AWS Load Balancer Controller, as in our setup, creating a Kubernetes Ingress resource automatically provisions an AWS ALB, while creating a Kubernetes Service resource of type LoadBalancer provisions an AWS NLB for application traffic distribution.
+Create New Load Balancers
+
+In our workshop setup, the UI application is configured with a Kubernetes Ingress resource and is accessible through an AWS ALB.
+Access the UI
+
+You can access the application UI by executing the following command to extract the ALB DNS name and Ctrl/Cmd-clicking on the URL in the output:
+
+kubectl get ingress -n apps retail-store-app-ui-main \
+  -o jsonpath="http://{.status.loadBalancer.ingress[*].hostname}{'\n'}"
+
+When migrating applications that use LoadBalancers to EKS Auto Mode, we need to create new load balancers, as existing ones, managed by the self-managed AWS Load Balancer controller, cannot be migrated to EKS Auto Mode.
+
+See here 
+
+for additional information on migrating resources in existing Amazon EKS clusters.
+
+In the UI component Helm implementation, we have defined Ingress resources as an array 
+
+, enabling us to create a new Ingress resource while maintaining the existing Ingress-created ALB during migration.
+
+➤ View the application's Ingress resources:
+
+kubectl get ingress -n apps
+
+If you're not using Helm, we recommend creating a new Ingress resource with a different name that uses the Ingress className created specifically for EKS Auto Mode.
+
+So, before proceeding with the migration, we will create a new IngressClass.
+
+This setup ensures that the necessary infrastructure configurations are in place to support ingress requirements for applications deployed later. Typically, this is a step performed by the platform team once after the cluster is created.
+
+➤ Define the new IngressClass:
+
+cat << EOF > ingress-class.yml
+apiVersion: eks.amazonaws.com/v1
+kind: IngressClassParams
+metadata:
+  name: eks-auto-mode-alb
+spec:
+  scheme: internet-facing
+---
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: eks-auto-mode-alb
+spec:
+  controller: eks.amazonaws.com/alb
+  parameters:
+    apiGroup: eks.amazonaws.com
+    kind: IngressClassParams
+    name: eks-auto-mode-alb
+EOF
+
+➤ Now let's deploy the IngressClass:
+
+kubectl apply -f ingress-class.yml
+
+With EKS Auto Mode enabled and the application prepared, we can move to migrating the application components, compute option by compute option.
+
+In the following Helm configuration, we are configuring a new Ingress resource by using a new IngressClass with the className: eks-auto-alb for the second Ingress resource definition.
+
+➤ Create the ui-ingress-values.yml file for the UI component (see here 
+
+for the whole values.yml file):
+
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+cat << EOF > ui-ingress-values.yml
+ingresses:
+  - enabled: true
+    className: alb
+    name: main
+    annotations:
+      alb.ingress.kubernetes.io/scheme: internet-facing
+      alb.ingress.kubernetes.io/target-type: ip
+  - enabled: true
+    className: eks-auto-mode-alb
+    name: main-auto-mode
+    annotations:
+      alb.ingress.kubernetes.io/scheme: internet-facing
+      alb.ingress.kubernetes.io/target-type: ip
+EOF
+
+Note that we need to define both the old and the new Ingress resources to avoid overriding the original configuration.
+
+➤ Update the UI component:
+
+1
+2
+3
+4
+5
+6
+helm upgrade retail-store-app-ui oci://public.ecr.aws/aws-containers/retail-store-sample-ui-chart \
+  --version ${RETAIL_STORE_APP_HELM_CHART_VERSION} \
+  --namespace apps \
+  --values ui-ingress-values.yml \
+  --reuse-values \
+  --wait
+
+➤ Verify that there are now two Ingress resources:
+
+kubectl get ingress -n apps
+
+➤ After a couple of minutes, let's verify that we can access the application UI via the new ALB by executing the following command to extract the DNS name and Ctrl/Cmd-clicking on the URL in the output:
+
+export AUTO_MODE_ALB_URL=$(kubectl get ingress -n apps retail-store-app-ui-main-auto-mode -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+
+aws elbv2 wait load-balancer-available --load-balancer-arns $(aws elbv2 describe-load-balancers --query 'LoadBalancers[?DNSName==`'"$AUTO_MODE_ALB_URL"'`].LoadBalancerArn' --output text)
+echo "The shared ALB is available at: http://$AUTO_MODE_ALB_URL"
+
+➤ Also let's verify that we can access the application UI via the old ALB by executing the following command to extract the DNS name and Ctrl/Cmd-clicking on the URL in the output:
+
+kubectl get ingress -n apps retail-store-app-ui-main \
+  -o jsonpath="http://{.status.loadBalancer.ingress[*].hostname}{'\n'}"
+
+Migrate to the New Load Balancers
+
+To ensure a successful migration, we should follow several best practices:
+
+    Schedule migrations during low-traffic periods and implement a DNS-based migration strategy for zero downtime.
+
+    EKS Auto Mode maintains compatibility with external-dns 
+
+    , which automatically registers new load balancers with Route 53. If we're not using external-dns, we'll need to update DNS entries either manually or through automation.
+
+    During the migration period, it is essential to maintain both the old and the new load balancers while continuously monitoring performance metrics.
+
+    Have a comprehensive rollback plan ready for any unexpected issues.
+
+    Once testing confirms a successful migration, we can remove the old load balancer by deleting its Ingress resource. In this example, we'll execute a helm upgrade to update the ingress array, removing the old ingress entry.
+
+➤ Create the ui-single-ingress-values.yml file:
+
+1
+2
+3
+4
+5
+6
+7
+8
+9
+cat << EOF > ui-single-ingress-values.yml
+ingresses:
+  - enabled: true
+    className: eks-auto-mode-alb
+    name: main-auto-mode
+    annotations:
+      alb.ingress.kubernetes.io/scheme: internet-facing
+      alb.ingress.kubernetes.io/target-type: ip
+EOF
+
+Note that the array above removes the second Ingress resource by overriding the entire ingresses array.
+
+➤ Update the UI component:
+
+1
+2
+3
+4
+5
+6
+helm upgrade retail-store-app-ui oci://public.ecr.aws/aws-containers/retail-store-sample-ui-chart \
+  --version ${RETAIL_STORE_APP_HELM_CHART_VERSION} \
+  --namespace apps \
+  --values ui-single-ingress-values.yml \
+  --reuse-values \
+  --wait
+
+➤ After a couple of minutes, let's verify that only one Ingress resource remains:
+
+kubectl get ingress -n apps
+
+➤ Let's verify that we can access the application UI via the new ALB by executing the following command to extract the DNS name and Ctrl/Cmd-clicking on the URL in the output:
+
+kubectl get ingress -n apps retail-store-app-ui-main-auto-mode \
+  -o jsonpath="http://{.status.loadBalancer.ingress[*].hostname}{'\n'}"
+
+➤ Let's verify that we can no longer retrieve the old ALB (expected to receive error):
+
+kubectl get ingress -n apps retail-store-app-ui-main \
+  -o jsonpath="http://{.status.loadBalancer.ingress[*].hostname}{'\n'}"
+
+Note that SSL certificates can be shared between your old and new load balancers. However, ensure that your certificate is configured with appropriate Subject Alternative Names (SANs) that match all domains served by both ALBs, particularly if you're changing domain names during migration.
+
+Server Name Indication (SNI) enables this functionality, allowing the ALB to select the correct certificate based on the client's requested hostname.
+
+We have now migrated almost all of our retail store application, with the catalog component's MySQL database as the only thing remaining.
+
+Let's fix that!
