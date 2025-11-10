@@ -1,0 +1,276 @@
+Migrating from a Self-Managed Karpenter
+
+Migrate the Checkout Component | Migrate the Carts Component | Migrate the UI Component
+
+In this section of the module, we will demonstrate how to migrate applications from a self-managed Karpenter to EKS Auto Mode.
+
+In the current setup, the self-managed Karpenter controller handles the compute requirements for the checkout, carts, and UI components of the retail store application.
+
+We will update these components to migrate to EKS Auto Mode by adding the relevant node selector and tolerations to align with the requirements defined in the apps-auto-mode EKS Auto Mode node pool.
+Migrate the checkout Component
+
+➤ Create the checkout-values.yml file for the checkout component (see here 
+
+for the whole values.yml file):
+
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+cat << EOF > checkout-values.yml
+replicaCount: 3
+
+nodeSelector:
+  role: apps-auto-mode
+
+tolerations:
+  - key: role
+    value: apps-auto-mode
+    operator: Equal
+    effect: NoSchedule
+
+redis:
+  nodeSelector:
+    role: apps-auto-mode
+  tolerations:
+    - key: role
+      value: apps-auto-mode
+      operator: Equal
+      effect: NoSchedule
+EOF
+
+➤ In a separate IDE terminal, execute the following command to observe the migration process:
+
+kubectl get pods -n apps -l app.kubernetes.io/name=checkout -w
+
+➤ Update the checkout component:
+
+1
+2
+3
+4
+5
+helm upgrade retail-store-app-checkout oci://public.ecr.aws/aws-containers/retail-store-sample-checkout-chart \
+  --version ${RETAIL_STORE_APP_HELM_CHART_VERSION} \
+  --namespace apps \
+  --values checkout-values.yml \
+  --wait
+
+➤ After a couple of minutes, we can verify that all checkout Pods are scheduled on the apps-auto-mode nodes by executing:
+
+export APPS_KARPENTER_AUTO_MODE_NODES=$(kubectl get nodes -o json | jq -r '[.items[].metadata.labels | select(."karpenter.sh/nodepool" == "apps-auto-mode") | ."kubernetes.io/hostname"] | join("\\|")')
+kubectl get pods -n apps -l app.kubernetes.io/instance=retail-store-app-checkout -o wide | grep "${APPS_KARPENTER_AUTO_MODE_NODES}"
+
+Migrate the carts Component
+
+➤ Create the carts-values.yml file for the carts component (see here 
+
+for the whole values.yml file):
+
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+cat << EOF > carts-values.yml
+replicaCount: 3
+
+nodeSelector:
+  role: apps-auto-mode
+
+tolerations:
+  - key: role
+    value: apps-auto-mode
+    operator: Equal
+    effect: NoSchedule
+
+dynamodb:
+  nodeSelector:
+    role: apps-auto-mode
+  tolerations:
+    - key: role
+      value: apps-auto-mode
+      operator: Equal
+      effect: NoSchedule
+EOF
+
+➤ In a separate IDE terminal, execute the following command to observe the migration process:
+
+kubectl get pods -n apps -l app.kubernetes.io/name=carts -w
+
+➤ Now, let's update the carts component:
+
+1
+2
+3
+4
+5
+helm upgrade retail-store-app-carts oci://public.ecr.aws/aws-containers/retail-store-sample-cart-chart \
+  --version ${RETAIL_STORE_APP_HELM_CHART_VERSION} \
+  --namespace apps \
+  --values carts-values.yml \
+  --wait
+
+➤ After a couple of minutes, verify that all carts Pods are scheduled on the apps-auto-mode nodes by executing:
+
+export APPS_KARPENTER_AUTO_MODE_NODES=$(kubectl get nodes -o json | jq -r '[.items[].metadata.labels | select(."karpenter.sh/nodepool" == "apps-auto-mode") | ."kubernetes.io/hostname"] | join("\\|")')
+kubectl get pods -n apps -l app.kubernetes.io/instance=retail-store-app-carts -o wide | grep "${APPS_KARPENTER_AUTO_MODE_NODES}"
+
+Migrate the UI Component
+
+➤ Create the ui-values.yml file for the UI component (see here 
+
+for the whole values.yml file):
+
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+cat << EOF > ui-values.yml
+replicaCount: 3
+
+app:
+  theme: default
+  endpoints:
+    catalog: http://retail-store-app-catalog:80
+    carts: http://retail-store-app-carts:80
+    checkout: http://retail-store-app-checkout:80
+    orders: http://retail-store-app-orders:80
+
+nodeSelector:
+  role: apps-auto-mode
+
+tolerations:
+  - key: role
+    value: apps-auto-mode
+    operator: Equal
+    effect: NoSchedule
+EOF
+
+➤ In a separate IDE terminal, execute the following command to observe the migration process:
+
+kubectl get pods -n apps -l app.kubernetes.io/name=ui -w
+
+➤ Update the UI component:
+
+1
+2
+3
+4
+5
+6
+helm upgrade retail-store-app-ui oci://public.ecr.aws/aws-containers/retail-store-sample-ui-chart \
+  --version ${RETAIL_STORE_APP_HELM_CHART_VERSION} \
+  --namespace apps \
+  --values ui-values.yml \
+  --reuse-values \
+  --wait
+
+➤ After a couple of minutes, verify that all ui Pods are scheduled on the apps-auto-mode nodes by executing:
+
+export APPS_KARPENTER_AUTO_MODE_NODES=$(kubectl get nodes -o json | jq -r '[.items[].metadata.labels | select(."karpenter.sh/nodepool" == "apps-auto-mode") | ."kubernetes.io/hostname"] | join("\\|")')
+kubectl get pods -n apps -l app.kubernetes.io/instance=retail-store-app-ui -o wide | grep "${APPS_KARPENTER_AUTO_MODE_NODES}"
+
+➤ View all the Pods (excluding DaemonSets) and their nodes to confirm the migration:
+
+export DAEMONSETS_PODS=$(kubectl get ds -n kube-system -o json | jq -r '[.items[].metadata.name] | join ("\\|")')
+kubectl get pods -A -o wide | grep -v "${DAEMONSETS_PODS}"
+
+We can omit DaemonSets to reduce visual clutter, since they do not impact the compute distribution.
+
+The expected output should be similar to the following (omitting the kube-system namespace components for brevity):
+
+NAMESPACE     NAME                                            READY   STATUS    RESTARTS   AGE     IP                NODE                                            NOMINATED NODE   READINESS GATES
+apps          retail-store-app-carts-7f8d59668-68nsc          1/1     Running   0          4m15s   192.168.46.178    i-0d26a453b47d25d9f                             <none>           <none>
+apps          retail-store-app-carts-7f8d59668-pbwzm          1/1     Running   0          4m15s   192.168.8.242     i-085c7fe5654a651c8                             <none>           <none>
+apps          retail-store-app-carts-7f8d59668-pgvjm          1/1     Running   0          3m55s   192.168.74.149    i-0ce7c07eb76652c22                             <none>           <none>
+apps          retail-store-app-catalog-59d4c7ddcf-47zdb       1/1     Running   0          11m     192.168.8.240     i-085c7fe5654a651c8                             <none>           <none>
+apps          retail-store-app-catalog-59d4c7ddcf-99tgc       1/1     Running   0          11m     192.168.46.176    i-0d26a453b47d25d9f                             <none>           <none>
+apps          retail-store-app-catalog-59d4c7ddcf-n4l6h       1/1     Running   0          11m     192.168.74.147    i-0ce7c07eb76652c22                             <none>           <none>
+apps          retail-store-app-catalog-mysql-0                1/1     Running   0          2d6h    192.168.119.154   ip-192-168-112-81.us-west-2.compute.internal    <none>           <none>
+apps          retail-store-app-checkout-6d9f5b4d4c-6t9kf      1/1     Running   0          5m21s   192.168.8.241     i-085c7fe5654a651c8                             <none>           <none>
+apps          retail-store-app-checkout-6d9f5b4d4c-ckczm      1/1     Running   0          4m58s   192.168.74.148    i-0ce7c07eb76652c22                             <none>           <none>
+apps          retail-store-app-checkout-6d9f5b4d4c-rd769      1/1     Running   0          5m21s   192.168.46.177    i-0d26a453b47d25d9f                             <none>           <none>
+apps          retail-store-app-orders-7f8bfccb58-5vkh7        1/1     Running   0          14m     192.168.74.144    i-0ce7c07eb76652c22                             <none>           <none>
+apps          retail-store-app-orders-7f8bfccb58-9gw88        1/1     Running   0          13m     192.168.74.146    i-0ce7c07eb76652c22                             <none>           <none>
+apps          retail-store-app-orders-7f8bfccb58-b72kt        1/1     Running   0          14m     192.168.74.145    i-0ce7c07eb76652c22                             <none>           <none>
+apps          retail-store-app-ui-fb8d55cc9-65vq9             1/1     Running   0          49s     192.168.46.179    i-0d26a453b47d25d9f                             <none>           <none>
+apps          retail-store-app-ui-fb8d55cc9-vpjkw             1/1     Running   0          49s     192.168.8.243     i-085c7fe5654a651c8                             <none>           <none>
+apps          retail-store-app-ui-fb8d55cc9-vr85v             1/1     Running   0          32s     192.168.74.150    i-0ce7c07eb76652c22                             <none>           <none>
+...
+
+You can see that all other application components' Pods in the apps namespace are running on EKS Auto Mode instances, while the MySQL and cluster operation software (controllers and add-ons) are not.
+
+➤ View the distribution of instances across capacity types:
+
+kubectl get nodes -o json | jq -r '.items[].metadata.labels | ."kubernetes.io/hostname" + " | " + ."topology.kubernetes.io/zone" + " | " + (."eks.amazonaws.com/capacityType" // if ."eks.amazonaws.com/compute-type" == "fargate" then "FARGATE" else "KARPENTER" end) + " | " + (."eks.amazonaws.com/nodegroup" // if ."karpenter.sh/nodepool" then "nodepool: " + ."karpenter.sh/nodepool" else "profile: apps" end)' | column -t | sort -k 5
+
+The result should be similar to the following:
+
+i-085c7fe5654a651c8                            |  us-west-2a  |  KARPENTER  |  nodepool:   apps-auto-mode
+i-0ce7c07eb76652c22                            |  us-west-2c  |  KARPENTER  |  nodepool:   apps-auto-mode
+i-0d26a453b47d25d9f                            |  us-west-2b  |  KARPENTER  |  nodepool:   apps-auto-mode
+...
+ip-192-168-112-81.us-west-2.compute.internal   |  us-west-2a  |  ON_DEMAND  |  apps-mng
+ip-192-168-150-83.us-west-2.compute.internal   |  us-west-2b  |  ON_DEMAND  |  apps-mng
+ip-192-168-184-40.us-west-2.compute.internal   |  us-west-2c  |  ON_DEMAND  |  apps-mng
+ip-192-168-133-200.us-west-2.compute.internal  |  us-west-2b  |  ON_DEMAND  |  system-mng  
+ip-192-168-171-235.us-west-2.compute.internal  |  us-west-2c  |  ON_DEMAND  |  system-mng  
+ip-192-168-99-105.us-west-2.compute.internal   |  us-west-2a  |  ON_DEMAND  |  system-mng  
+
+Observing the `apps` node pool
+
+Note that you may continue to see the apps node pool with its now empty nodes, while Karpenter terminates them.
+
+We can verify (by running kubectl describe node... commands for system-mng and apps-mng node group nodes) that the only non-DaemonSet pods that remain on them are the operational software (like self-managed Karpenter) and the catalog component's MySQL pod.
+
+We now successfully migrated all the application components pods (again, excluding catalog component's MySQL database) to EKS Auto Mode.
